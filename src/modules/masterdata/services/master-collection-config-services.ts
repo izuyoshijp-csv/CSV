@@ -88,13 +88,18 @@ function normalizeFieldList(fields: string[]) {
 
 function normalizeFieldConfigs(
   fields: string[],
-  _fieldConfigs: MasterCollectionFieldConfig[] | undefined
+  fieldConfigs: MasterCollectionFieldConfig[] | undefined
 ) {
+  const configsByName = new Map(
+    (fieldConfigs ?? []).map((fieldConfig) => [fieldConfig.name.trim(), fieldConfig])
+  )
+
   const normalized = fields.map((name) => {
+    const config = configsByName.get(name)
     return {
       name,
-      required: false,
-      unique: false,
+      required: config?.required ?? false,
+      unique: config?.unique ?? false,
     }
   })
 
@@ -135,17 +140,33 @@ function mergeDefaultConfigs(configs: MasterCollectionConfig[]) {
   return [...byCollection.values()].filter((config) => config.active !== false)
 }
 
-function getLocalConfigs() {
-  if (typeof window === "undefined") return defaultMasterCollectionConfigs
+function mergeConfigSources(...sources: MasterCollectionConfig[][]) {
+  const byCollection = new Map<string, MasterCollectionConfig>()
 
+  sources.forEach((configs) => {
+    configs.forEach((config) => {
+      const normalized = normalizeMasterCollectionConfig(config)
+      if (normalized.fields.length) byCollection.set(normalized.collectionName, normalized)
+    })
+  })
+
+  return [...byCollection.values()].filter((config) => config.active !== false)
+}
+
+function getStoredLocalConfigs() {
+  if (typeof window === "undefined") return null
   const raw = window.localStorage.getItem(STORAGE_KEY)
-  if (!raw) return defaultMasterCollectionConfigs
+  if (!raw) return null
 
   try {
     return JSON.parse(raw) as MasterCollectionConfig[]
   } catch {
-    return defaultMasterCollectionConfigs
+    return null
   }
+}
+
+function getLocalConfigs() {
+  return getStoredLocalConfigs() ?? defaultMasterCollectionConfigs
 }
 
 function setLocalConfigs(configs: MasterCollectionConfig[]) {
@@ -157,7 +178,8 @@ export const masterCollectionConfigRepository = {
   async list() {
     try {
       const remote = await masterCollectionConfigService.list()
-      const merged = mergeDefaultConfigs(remote)
+      const local = getStoredLocalConfigs() ?? []
+      const merged = mergeConfigSources(defaultMasterCollectionConfigs, remote, local)
       setLocalConfigs(merged)
       return merged
     } catch {

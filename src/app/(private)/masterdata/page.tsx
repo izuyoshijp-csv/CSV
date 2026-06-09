@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { ArrowDown, ArrowUp, Copy, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import * as XLSX from "xlsx"
@@ -247,19 +247,33 @@ async function parseImportFile(file: File, config: MasterCollectionConfig) {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: "array" })
   const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
+  if (!firstSheet) {
+    throw new Error("Import file has no sheet.")
+  }
+
   const rows = XLSX.utils.sheet_to_json<unknown[]>(firstSheet, {
     header: 1,
     defval: "",
     blankrows: false,
   })
 
+  if (rows.length < 2) {
+    throw new Error("Import file has no data rows.")
+  }
+
+  const headers = rows[0].map((value) => normalizeText(value))
+  const headerIndexes = new Map(headers.map((header, index) => [header, index]))
+  const canUseHeaderMap = config.fields.every((field) => headerIndexes.has(field))
+
   return rows
     .slice(1)
-    .map((row) =>
-      Object.fromEntries(
-        config.fields.map((field, index) => [field, normalizeText(row[index])])
-      )
-    )
+    .map((row) => {
+      const entries = config.fields.map((field, index) => {
+        const sourceIndex = canUseHeaderMap ? headerIndexes.get(field) ?? index : index
+        return [field, normalizeText(row[sourceIndex])]
+      })
+      return Object.fromEntries(entries)
+    })
     .filter((row) => config.fields.some((field) => normalizeText(row[field])))
     .map((row) => row as DynamicMasterDataRecord)
 }
@@ -293,6 +307,7 @@ export default function MasterDataPage() {
     imported: 0,
     total: 0,
   })
+  const importInputId = useId()
   const importInputRef = useRef<HTMLInputElement | null>(null)
   const confirmDialog = useConfirmDialog()
 
@@ -427,7 +442,14 @@ export default function MasterDataPage() {
         })
       )
       if (editingConfig) {
-        await applyDynamicMasterFieldChanges(saved, editingConfig.fields, fields)
+        try {
+          await applyDynamicMasterFieldChanges(saved, editingConfig.fields, fields)
+        } catch (error) {
+          console.warn("Could not migrate existing master data fields:", error)
+          toast.warning(
+            "データリスト設定は保存しましたが、既存データのフィールド移行に失敗しました。Firestore rules を確認してください。"
+          )
+        }
       }
       setConfigDialogOpen(false)
       setActiveCollection(saved.collectionName)
@@ -826,10 +848,12 @@ export default function MasterDataPage() {
                         追加
                       </Button>
                       <input
+                        id={importInputId}
                         ref={config.collectionName === activeCollection ? importInputRef : undefined}
                         type="file"
                         accept=".csv,.xlsx,.xls"
                         className="hidden"
+                        disabled={saving}
                         onChange={(event) => {
                           const file = event.target.files?.[0]
                           if (file) void importFile(file)
@@ -839,8 +863,14 @@ export default function MasterDataPage() {
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => importInputRef.current?.click()}
-                        disabled={saving}
+                        onClick={() => {
+                          const input =
+                            importInputRef.current ??
+                            (document.getElementById(importInputId) as HTMLInputElement | null)
+                          input?.click()
+                        }}
+                        className={saving ? "pointer-events-none opacity-50" : undefined}
+                        aria-disabled={saving}
                       >
                         インポート
                       </Button>
