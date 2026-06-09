@@ -1,0 +1,82 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+.pnpm-store/
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+
+# Environment files — KHÔNG BAO GIỜ commit credentials/API keys
+.env
+.env.local
+.env.development
+.env.development.local
+.env.production
+.env.production.local
+.env.test.local
+.env.*.local
+
+# Firebase
+firebase-debug*.log
+firebase-debug*.log.*
+firebase.json
+
+# Server-side Firebase Admin credentials (tuyệt đối không commit)
+*firebase*.json
+service-account*.json
+!firebase.json.sample
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+logs/
+*.log
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Lint / cache
+.eslintcache
+.eslintout/
+.rargrc
+.cache/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Turborepo / monorepo
+.turbo/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.sublime-workspace
+*.sublime-project
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Vercel
+.vercel
+
+# Misc
+.pids/
+*.pid
+*.pem
+.env
+.env.local
+serviceAccountKey.json
+firebase-adminsdk*.json
