@@ -81,6 +81,7 @@ import {
   exportRowsToCsv,
   loadMasterDataStoreForMapping,
   loadMasterDataStoreForRows,
+  mergeMasterDataStore,
   readExcelByMapping,
   refreshDerivedCsvRows,
   validateCsvRows,
@@ -823,10 +824,8 @@ export function CsvCreatePageContent() {
     }
   }
 
-  function applyCellEdits(edits: CsvCellEdit[]) {
-    if (!sessionOpen) return
-    if (!edits.length) return
-    const nextRows = draftRows.map((row) => {
+  function applyEditsToRows(sourceRows: CsvWorkingRow[], edits: CsvCellEdit[]) {
+    return sourceRows.map((row) => {
       const rowEdits = edits.filter((edit) => edit.rowId === row.id)
       if (!rowEdits.length) return row
       const nextValues = { ...row.values }
@@ -848,6 +847,12 @@ export function CsvCreatePageContent() {
         values: nextValues,
       }
     })
+  }
+
+  function applyCellEdits(edits: CsvCellEdit[]) {
+    if (!sessionOpen) return
+    if (!edits.length) return
+    const nextRows = applyEditsToRows(draftRows, edits)
 
     if (selectedMapping) {
       const refreshed = refreshDerivedCsvRows({
@@ -862,6 +867,34 @@ export function CsvCreatePageContent() {
       setDraftRows(nextRows)
     }
     setHasUnsavedChanges(true)
+  }
+
+  async function refreshLookupForEditedRows(nextRows: CsvWorkingRow[], rowIds: string[]) {
+    if (!selectedMapping || !sessionOpen) return
+    const rowIdSet = new Set(rowIds)
+    const changedRows = nextRows.filter((row) => rowIdSet.has(row.id))
+    if (!changedRows.length) return
+
+    try {
+      const additionalMasterData = await loadMasterDataStoreForRows({
+        rows: changedRows,
+        mapping: selectedMapping,
+      })
+      const nextMasterData = mergeMasterDataStore(masterDataStore ?? {}, additionalMasterData)
+      setMasterDataStore(nextMasterData)
+
+      const refreshed = refreshDerivedCsvRows({
+        rows: nextRows,
+        mapping: selectedMapping,
+        masterData: nextMasterData,
+        existingIssues: issues,
+      })
+      const nextIssues = validateCsvRows(refreshed.rows, refreshed.issues)
+      setDraftRows(refreshed.rows)
+      setIssues(nextIssues)
+    } catch {
+      toast.error("lookupデータの更新に失敗しました。")
+    }
   }
 
   function applyRowUpdate(nextRows: CsvWorkingRow[], deletedRowIds: string[] = []) {
@@ -1063,6 +1096,10 @@ export function CsvCreatePageContent() {
   }
 
   function commitCell(rowId: string, column: CsvColumnLetter, value: string) {
+    if (sessionOpen && selectedMapping) {
+      const nextRows = applyEditsToRows(draftRows, [{ rowId, column, value }])
+      void refreshLookupForEditedRows(nextRows, [rowId])
+    }
     void maybeFillStaticColumn(rowId, column, value)
   }
 

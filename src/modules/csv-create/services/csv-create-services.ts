@@ -831,7 +831,7 @@ function cloneMasterDataStore(store: MasterDataLookupStore = {}) {
   ) as MasterDataLookupStore
 }
 
-function mergeMasterDataStore(
+export function mergeMasterDataStore(
   baseStore: MasterDataLookupStore,
   nextStore: MasterDataLookupStore
 ) {
