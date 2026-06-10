@@ -96,7 +96,7 @@ type SearchConfig = {
   conditions: SearchCondition[]
 }
 type PageMeta = {
-  totalCount: number
+  totalCount: number | null
   firstCursor: DynamicMasterDataPageCursor
   lastCursor: DynamicMasterDataPageCursor
   hasPreviousPage: boolean
@@ -181,7 +181,7 @@ function createSearchCondition(config?: MasterCollectionConfig | null): SearchCo
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     field: config ? getLookupKeyField(config) : "",
-    operator: "equals",
+    operator: "contains",
     value: "",
   }
 }
@@ -203,26 +203,20 @@ function getSearchConfig(
     conditions: conditions.map((condition) => ({
       ...condition,
       field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
+      operator: "contains" as const,
     })),
   }
 }
 
 function getAppliedSearchConditions(config: MasterCollectionConfig, searchConfig: SearchConfig) {
-  let hasPrefixCondition = false
-
   return searchConfig.conditions
     .map((condition) => ({
       field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
-      operator: condition.operator,
+      operator: "contains" as const,
       value: normalizeText(condition.value),
     }))
     .filter((condition) => {
-      if (!condition.value) return false
-      if (condition.operator === "prefix") {
-        if (hasPrefixCondition) return false
-        hasPrefixCondition = true
-      }
-      return true
+      return Boolean(condition.value)
     })
 }
 
@@ -373,7 +367,8 @@ export default function MasterDataPage() {
           cursor,
           search: appliedConditions.length ? { conditions: appliedConditions } : undefined,
         })
-        const totalPages = Math.max(1, Math.ceil(page.totalCount / pageSize))
+        const totalPages =
+          page.totalCount === null ? null : Math.max(1, Math.ceil(page.totalCount / pageSize))
 
         setRecordsByCollection((current) => ({
           ...current,
@@ -393,11 +388,13 @@ export default function MasterDataPage() {
           const currentPage = current[activeConfig.collectionName] ?? 1
           const nextPage =
             direction === "next"
-              ? Math.min(currentPage + 1, totalPages)
+              ? totalPages === null
+                ? currentPage + 1
+                : Math.min(currentPage + 1, totalPages)
               : direction === "previous"
                 ? Math.max(currentPage - 1, 1)
                 : direction === "last"
-                  ? totalPages
+                  ? totalPages ?? currentPage
                   : 1
 
           return {
@@ -908,13 +905,16 @@ export default function MasterDataPage() {
               const searchConfig = getSearchConfig(searchByCollection, config)
               const searchDraft = getSearchConfig(searchDraftByCollection, config)
               const appliedConditionCount = getAppliedSearchConditions(config, searchConfig).length
-              const prefixDraftCount = searchDraft.conditions.filter((condition) => {
-                return condition.operator === "prefix" && normalizeText(condition.value)
-              }).length
               const pageSize = pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
-              const totalPages = Math.max(1, Math.ceil(pageMeta.totalCount / pageSize))
+              const totalPages =
+                pageMeta.totalCount === null
+                  ? null
+                  : Math.max(1, Math.ceil(pageMeta.totalCount / pageSize))
               const requestedPage = pageByCollection[config.collectionName] ?? 1
-              const currentPage = Math.min(Math.max(requestedPage, 1), totalPages)
+              const currentPage =
+                totalPages === null
+                  ? Math.max(requestedPage, 1)
+                  : Math.min(Math.max(requestedPage, 1), totalPages)
               const pageStartIndex = (currentPage - 1) * pageSize
               if (config.collectionName !== activeCollection) return null
 
@@ -1018,7 +1018,7 @@ export default function MasterDataPage() {
                       {searchDraft.conditions.map((condition, conditionIndex) => (
                         <div
                           key={condition.id}
-                          className="grid gap-2 lg:grid-cols-[minmax(160px,220px)_140px_minmax(220px,1fr)_auto]"
+                          className="grid gap-2 lg:grid-cols-[minmax(180px,260px)_minmax(220px,1fr)_auto]"
                         >
                           <Select
                             value={condition.field}
@@ -1042,25 +1042,6 @@ export default function MasterDataPage() {
                               ))}
                             </SelectContent>
                           </Select>
-                          <Select
-                            value={condition.operator}
-                            onValueChange={(operator: "equals" | "prefix") => {
-                              updateSearchDraft(config, (current) => ({
-                                ...current,
-                                conditions: current.conditions.map((item) =>
-                                  item.id === condition.id ? { ...item, operator } : item
-                                ),
-                              }))
-                            }}
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="equals">=</SelectItem>
-                              <SelectItem value="prefix">前方一致</SelectItem>
-                            </SelectContent>
-                          </Select>
                           <div className="relative">
                             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                             <Input
@@ -1075,9 +1056,7 @@ export default function MasterDataPage() {
                                 }))
                               }}
                               className="pl-9"
-                              placeholder={
-                                condition.operator === "prefix" ? "前方一致で検索..." : "完全一致で検索..."
-                              }
+                              placeholder="含む文字で検索..."
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") applySearchDraft(config)
                               }}
@@ -1144,7 +1123,6 @@ export default function MasterDataPage() {
                       </div>
                       <div className="text-xs text-muted-foreground">
                         適用中: {appliedConditionCount} 条件
-                        {prefixDraftCount > 1 ? " / 前方一致は最初の1条件のみ適用" : ""}
                       </div>
                     </div>
                   </div>
@@ -1242,7 +1220,11 @@ export default function MasterDataPage() {
                         </Select>
                       </div>
                       <div>
-                        {pageMeta.totalCount
+                        {pageMeta.totalCount === null
+                          ? rows.length
+                            ? `${rows.length} 件表示`
+                            : "0 / 0 件"
+                          : pageMeta.totalCount
                           ? `${pageStartIndex + 1}-${Math.min(
                               pageStartIndex + rows.length,
                               pageMeta.totalCount
@@ -1250,7 +1232,9 @@ export default function MasterDataPage() {
                           : "0 / 0 件"}
                       </div>
                       <div>
-                        ページ {currentPage} / {totalPages}
+                        {totalPages === null
+                          ? `ページ ${currentPage}`
+                          : `ページ ${currentPage} / ${totalPages}`}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-1">
@@ -1273,14 +1257,19 @@ export default function MasterDataPage() {
                         <ChevronLeft className="size-4" />
                       </Button>
                       <Button type="button" size="sm" disabled className="min-w-24">
-                        {currentPage} / {totalPages}
+                        {totalPages === null ? currentPage : `${currentPage} / ${totalPages}`}
                       </Button>
                       <Button
                         type="button"
                         size="icon"
                         variant="outline"
                         onClick={() => void loadActivePage("next", pageMeta.lastCursor)}
-                        disabled={tableLoading || currentPage >= totalPages}
+                        disabled={
+                          tableLoading ||
+                          (totalPages === null
+                            ? !pageMeta.hasNextPage
+                            : currentPage >= totalPages)
+                        }
                       >
                         <ChevronRight className="size-4" />
                       </Button>
@@ -1289,7 +1278,11 @@ export default function MasterDataPage() {
                         size="icon"
                         variant="outline"
                         onClick={() => void loadActivePage("last")}
-                        disabled={tableLoading || currentPage >= totalPages}
+                        disabled={
+                          tableLoading ||
+                          totalPages === null ||
+                          currentPage >= totalPages
+                        }
                       >
                         <ChevronsRight className="size-4" />
                       </Button>

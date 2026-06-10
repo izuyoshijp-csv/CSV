@@ -77,7 +77,7 @@ export type DynamicMasterDataSearchOptions = {
 
 export type DynamicMasterDataSearchCondition = {
   field: string
-  operator: "equals" | "prefix"
+  operator: "equals" | "prefix" | "contains"
   value: string
 }
 
@@ -92,7 +92,7 @@ export type DynamicMasterDataPageOptions = {
 
 export type DynamicMasterDataPage = {
   rows: DynamicMasterDataRecord[]
-  totalCount: number
+  totalCount: number | null
   firstCursor: DynamicMasterDataPageCursor
   lastCursor: DynamicMasterDataPageCursor
   hasPreviousPage: boolean
@@ -109,6 +109,7 @@ const DEFAULT_BULK_IMPORT_BATCH_SIZE = 400
 const DEFAULT_BULK_IMPORT_BATCH_DELAY_MS = 250
 const DEFAULT_DOCUMENT_ID_LOOKUP_BATCH_SIZE = 20
 const DEFAULT_DOCUMENT_ID_LOOKUP_DELAY_MS = 150
+const DEFAULT_CONTAINS_SEARCH_BATCH_SIZE = 200
 
 export async function getCusCodeList(): Promise<CusCodeListItem[]> {
   return getFirestoreCollection<CusCodeListItem>("CusCodeList", emptyCusCodeData)
@@ -155,7 +156,11 @@ function getDynamicMasterDataQueryConstraints(
       value: String(condition.value ?? "").trim(),
     }))
     .filter((condition) => {
-      return Boolean(condition.value) && config.fields.includes(condition.field)
+      return (
+        Boolean(condition.value) &&
+        config.fields.includes(condition.field) &&
+        condition.operator !== "contains"
+      )
     })
   const prefixCondition = conditions.find((condition) => condition.operator === "prefix")
   const equalsConditions = conditions.filter((condition) => {
@@ -177,10 +182,129 @@ function getDynamicMasterDataQueryConstraints(
   return constraints
 }
 
+function getContainsSearchConditions(
+  config: MasterCollectionConfig,
+  search: DynamicMasterDataSearchOptions = {}
+) {
+  return (search.conditions ?? [])
+    .map((condition) => ({
+      ...condition,
+      value: String(condition.value ?? "").trim().toLowerCase(),
+    }))
+    .filter((condition) => {
+      return (
+        condition.operator === "contains" &&
+        Boolean(condition.value) &&
+        config.fields.includes(condition.field)
+      )
+    })
+}
+
+function matchesContainsSearch(
+  record: DynamicMasterDataRecord,
+  conditions: DynamicMasterDataSearchCondition[]
+) {
+  return conditions.every((condition) => {
+    return String(record[condition.field] ?? "")
+      .toLowerCase()
+      .includes(String(condition.value ?? "").toLowerCase())
+  })
+}
+
+async function getDynamicMasterDataContainsPage(
+  config: MasterCollectionConfig,
+  options: DynamicMasterDataPageOptions,
+  containsConditions: DynamicMasterDataSearchCondition[]
+): Promise<DynamicMasterDataPage> {
+  const db = getFirestoreSafe()
+  if (!db) {
+    throw new Error(
+      "Firebase is not configured. Please set NEXT_PUBLIC_FIREBASE_* environment variables."
+    )
+  }
+
+  const pageSize = Math.max(1, options.pageSize)
+  const collectionRef = collection(db, config.collectionName)
+  const orderField = getLookupKeyField(config) || "__name__"
+  const batchSize = Math.max(pageSize, DEFAULT_CONTAINS_SEARCH_BATCH_SIZE)
+  const direction = options.direction ?? "first"
+  const rows: DynamicMasterDataRecord[] = []
+  let firstCursor: DynamicMasterDataPageCursor = null
+  let lastCursor: DynamicMasterDataPageCursor = null
+  let scanCursor = options.cursor
+  let reachedBoundary = false
+
+  while (true) {
+    const constraints: QueryConstraint[] = [orderBy(orderField)]
+
+    if ((direction === "next" || direction === "first") && scanCursor) {
+      constraints.push(startAfter(scanCursor))
+    }
+
+    if (direction === "previous") {
+      if (scanCursor) constraints.push(endBefore(scanCursor))
+      constraints.push(limitToLast(batchSize))
+    } else {
+      constraints.push(limit(batchSize))
+    }
+
+    const snapshot = await getDocs(query(collectionRef, ...constraints))
+    const documents = snapshot.docs
+
+    if (!documents.length) {
+      reachedBoundary = true
+      break
+    }
+
+    if (direction === "previous") {
+      firstCursor = documents[0]
+      lastCursor = lastCursor ?? documents[documents.length - 1]
+    } else {
+      firstCursor = firstCursor ?? documents[0]
+      lastCursor = documents[documents.length - 1]
+    }
+    const matchedRows = documents
+      .map(mapDynamicMasterDataSnapshot)
+      .filter((record) => matchesContainsSearch(record, containsConditions))
+
+    if (direction === "previous") {
+      rows.unshift(...matchedRows)
+      scanCursor = documents[0]
+    } else {
+      rows.push(...matchedRows)
+      scanCursor = documents[documents.length - 1]
+    }
+
+    if (rows.length >= pageSize) break
+    if (documents.length < batchSize) {
+      reachedBoundary = true
+      break
+    }
+  }
+
+  const pageRows = direction === "previous" ? rows.slice(-pageSize) : rows.slice(0, pageSize)
+
+  return {
+    rows: pageRows,
+    totalCount: null,
+    firstCursor,
+    lastCursor,
+    hasPreviousPage: direction !== "first" && Boolean(options.cursor) && !reachedBoundary,
+    hasNextPage:
+      direction === "previous" ||
+      (!reachedBoundary && Boolean(lastCursor) && rows.length >= pageSize),
+  }
+}
+
 export async function getDynamicMasterDataPage(
   config: MasterCollectionConfig,
   options: DynamicMasterDataPageOptions
 ): Promise<DynamicMasterDataPage> {
+  const containsConditions = getContainsSearchConditions(config, options.search)
+  if (containsConditions.length) {
+    return getDynamicMasterDataContainsPage(config, options, containsConditions)
+  }
+
   const db = getFirestoreSafe()
   if (!db) {
     throw new Error(
