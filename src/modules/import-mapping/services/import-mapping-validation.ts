@@ -48,7 +48,7 @@ function validateEntry(entry: ImportMappingEntry, index: number) {
       addIssue(issues, {
         field: `${prefix}.targetColumns`,
         entryId: entry.id,
-        message: "CSV列はAからAQまでの列名で入力してください。",
+        message: "CSV列はA、AR、AAAのような列名で入力してください。",
       })
     }
   })
