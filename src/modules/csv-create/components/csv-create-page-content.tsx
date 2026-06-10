@@ -342,6 +342,25 @@ interface CsvCellEdit {
   column: CsvColumnLetter
   value: string
 }
+type MasterDataChangedPayload = {
+  changedAt?: string
+  collectionName?: string
+  lookupKeys?: string[]
+}
+
+function normalizeLookupText(value: unknown) {
+  return String(value ?? "").trim()
+}
+
+function parseMasterDataChangedPayload(value: string | null): MasterDataChangedPayload | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as MasterDataChangedPayload
+    return parsed && typeof parsed === "object" ? parsed : { changedAt: value }
+  } catch {
+    return { changedAt: value }
+  }
+}
 
 interface CsvCellSelection {
   startRowId: string
@@ -646,18 +665,23 @@ export function CsvCreatePageContent() {
     if (!sessionOpen || !selectedMapping || !draftRows.length) return
 
     let refreshing = false
-    const refreshSilently = () => {
+    const refreshSilently = (payload?: MasterDataChangedPayload | null) => {
       if (refreshing) return
       refreshing = true
-      void refreshDerivedValues({ silent: true }).finally(() => {
+      const refreshPromise =
+        payload?.collectionName && payload.lookupKeys?.length
+          ? refreshChangedMasterData(payload)
+          : payload
+            ? (clearCsvMasterDataLookupCache(), refreshDerivedValues({ silent: true }))
+            : refreshDerivedValues({ silent: true })
+      void refreshPromise.finally(() => {
         refreshing = false
       })
     }
 
     const handleStorage = (event: StorageEvent) => {
       if (event.key === MASTER_DATA_CHANGED_STORAGE_KEY) {
-        clearCsvMasterDataLookupCache()
-        refreshSilently()
+        refreshSilently(parseMasterDataChangedPayload(event.newValue))
       }
     }
     const handleFocus = () => refreshSilently()
@@ -674,7 +698,7 @@ export function CsvCreatePageContent() {
       window.removeEventListener("focus", handleFocus)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [draftRows.length, issues, selectedMapping, sessionOpen])
+  }, [draftRows, hasUnsavedChanges, issues, masterDataStore, selectedMapping, sessionOpen])
 
   function clearWorkingData(nextSelectedMappingId = selectedMappingId) {
     setSelectedMappingId(nextSelectedMappingId)
@@ -733,6 +757,41 @@ export function CsvCreatePageContent() {
     } finally {
       setProcessing(false)
     }
+  }
+
+  async function refreshChangedMasterData(payload: MasterDataChangedPayload) {
+    if (!selectedMapping || !payload.collectionName || !payload.lookupKeys?.length) {
+      clearCsvMasterDataLookupCache()
+      await refreshDerivedValues({ silent: true })
+      return
+    }
+
+    const lookupKeys = new Set(
+      payload.lookupKeys.map((key) => normalizeLookupText(key)).filter(Boolean)
+    )
+    if (!lookupKeys.size) return
+
+    lookupKeys.forEach((key) => {
+      clearCsvMasterDataLookupCache(payload.collectionName, key)
+    })
+
+    const changedRowIds = draftRows
+      .filter((row) =>
+        selectedMapping.entries.some((entry) => {
+          if (entry.dataSource !== "masterLookup") return false
+          if (entry.lookupCollection !== payload.collectionName || !entry.lookupCsvColumn) {
+            return false
+          }
+          return lookupKeys.has(normalizeLookupText(row.values[entry.lookupCsvColumn]?.value))
+        })
+      )
+      .map((row) => row.id)
+
+    if (!changedRowIds.length) return
+
+    await refreshLookupForEditedRows(draftRows, changedRowIds, {
+      commitRows: !hasUnsavedChanges,
+    })
   }
 
   async function rebuildWithManualValues(nextManualValues = manualValues) {
@@ -869,7 +928,11 @@ export function CsvCreatePageContent() {
     setHasUnsavedChanges(true)
   }
 
-  async function refreshLookupForEditedRows(nextRows: CsvWorkingRow[], rowIds: string[]) {
+  async function refreshLookupForEditedRows(
+    nextRows: CsvWorkingRow[],
+    rowIds: string[],
+    options: { commitRows?: boolean } = {}
+  ) {
     if (!selectedMapping || !sessionOpen) return
     const rowIdSet = new Set(rowIds)
     const changedRows = nextRows.filter((row) => rowIdSet.has(row.id))
@@ -890,6 +953,10 @@ export function CsvCreatePageContent() {
         existingIssues: issues,
       })
       const nextIssues = validateCsvRows(refreshed.rows, refreshed.issues)
+      if (options.commitRows) {
+        setRows(refreshed.rows)
+        setHasUnsavedChanges(false)
+      }
       setDraftRows(refreshed.rows)
       setIssues(nextIssues)
     } catch {

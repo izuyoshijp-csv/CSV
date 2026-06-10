@@ -86,6 +86,7 @@ import type { MasterCollectionConfig, MasterCollectionFieldConfig } from "@/type
 const MASTER_DATA_CHANGED_STORAGE_KEY = "master-data:changed-at"
 const DEFAULT_PAGE_SIZE = 30
 const PAGE_SIZE_OPTIONS = [20, 30, 50] as const
+const MAX_CHANGED_LOOKUP_KEYS_IN_EVENT = 200
 
 type RecordDialogMode = "create" | "edit"
 type FieldDraft = MasterCollectionFieldConfig
@@ -115,10 +116,21 @@ type ImportProgressState = {
   imported: number
   total: number
 }
+type MasterDataChangedPayload = {
+  changedAt: string
+  collectionName?: string
+  lookupKeys?: string[]
+}
 
-function notifyMasterDataChanged() {
+function notifyMasterDataChanged(change: Omit<MasterDataChangedPayload, "changedAt"> = {}) {
   if (typeof window === "undefined") return
-  window.localStorage.setItem(MASTER_DATA_CHANGED_STORAGE_KEY, new Date().toISOString())
+  window.localStorage.setItem(
+    MASTER_DATA_CHANGED_STORAGE_KEY,
+    JSON.stringify({
+      changedAt: new Date().toISOString(),
+      ...change,
+    } satisfies MasterDataChangedPayload)
+  )
 }
 
 function normalizeText(value: unknown) {
@@ -670,7 +682,10 @@ export default function MasterDataPage() {
         await updateDynamicMasterDataRecord(activeConfig, editingRecordId, normalizedRecord)
       }
 
-      notifyMasterDataChanged()
+      notifyMasterDataChanged({
+        collectionName: activeConfig.collectionName,
+        lookupKeys: [lookupKey],
+      })
       setRecordDialogOpen(false)
       await loadActivePage("first")
       toast.success("マスタデータを保存しました。")
@@ -685,8 +700,13 @@ export default function MasterDataPage() {
     if (!activeConfig || !deleteTarget) return
     setSaving(true)
     try {
+      const lookupKeyField = getLookupKeyField(activeConfig)
+      const lookupKey = normalizeText(deleteTarget[lookupKeyField])
       await deleteDynamicMasterDataRecord(activeConfig, getRecordId(activeConfig, deleteTarget))
-      notifyMasterDataChanged()
+      notifyMasterDataChanged({
+        collectionName: activeConfig.collectionName,
+        lookupKeys: lookupKey ? [lookupKey] : undefined,
+      })
       setDeleteTarget(null)
       await loadActivePage("first")
       toast.success("マスタデータを削除しました。")
@@ -702,7 +722,9 @@ export default function MasterDataPage() {
     setSaving(true)
     try {
       const deletedCount = await deleteAllDynamicMasterDataRecords(deleteAllTarget)
-      notifyMasterDataChanged()
+      notifyMasterDataChanged({
+        collectionName: deleteAllTarget.collectionName,
+      })
       setDeleteAllTarget(null)
       await loadActivePage("first")
       toast.success(`${deletedCount} 件のデータを削除しました。`)
@@ -787,7 +809,13 @@ export default function MasterDataPage() {
         imported: importedCount,
         total: validRows.length,
       })
-      notifyMasterDataChanged()
+      notifyMasterDataChanged({
+        collectionName: activeConfig.collectionName,
+        lookupKeys:
+          validRows.length <= MAX_CHANGED_LOOKUP_KEYS_IN_EVENT
+            ? validRows.map((row) => normalizeText(row[lookupKeyField])).filter(Boolean)
+            : undefined,
+      })
       await loadActivePage("first")
       restoreScrollPosition(scrollY)
       setImportProgress({

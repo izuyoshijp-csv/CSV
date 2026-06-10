@@ -63,7 +63,11 @@ let masterConfigsByCollectionCache: {
   configs: Map<string, MasterCollectionConfig>
 } | null = null
 
-export function clearCsvMasterDataLookupCache() {
+export function clearCsvMasterDataLookupCache(collection?: string, sourceValue?: string) {
+  if (collection && sourceValue) {
+    masterLookupRecordCache.delete(getLookupRequestKey(collection, sourceValue))
+    return
+  }
   masterLookupRecordCache.clear()
   masterConfigsByCollectionCache = null
 }
