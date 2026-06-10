@@ -1,7 +1,21 @@
 "use client"
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
-import { ArrowDown, ArrowUp, Copy, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react"
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Copy,
+  Loader2,
+  Pencil,
+  Plus,
+  Search,
+  SlidersHorizontal,
+  Trash2,
+} from "lucide-react"
 import { toast } from "sonner"
 import * as XLSX from "xlsx"
 
@@ -27,14 +41,23 @@ import {
 } from "@/components/ui/dialog"
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Table,
   TableBody,
@@ -61,9 +84,17 @@ import {
 import type { MasterCollectionConfig, MasterCollectionFieldConfig } from "@/types/firestore-models"
 
 const MASTER_DATA_CHANGED_STORAGE_KEY = "master-data:changed-at"
+const DEFAULT_PAGE_SIZE = 30
+const PAGE_SIZE_OPTIONS = [20, 30, 50] as const
 
 type RecordDialogMode = "create" | "edit"
 type FieldDraft = MasterCollectionFieldConfig
+type SearchMode = "all" | "columns"
+type SearchConfig = {
+  query: string
+  mode: SearchMode
+  fields: string[]
+}
 type ImportProgressState = {
   open: boolean
   status:
@@ -146,13 +177,44 @@ function getRecordId(config: MasterCollectionConfig, record: DynamicMasterDataRe
 function matchesRecordSearch(
   config: MasterCollectionConfig,
   record: DynamicMasterDataRecord,
-  query: string
+  searchConfig: SearchConfig
 ) {
-  const normalizedQuery = normalizeSearchText(query)
+  const normalizedQuery = normalizeSearchText(searchConfig.query)
   if (!normalizedQuery) return true
-  return config.fields.some((field) =>
+  const searchFields =
+    searchConfig.mode === "columns" && searchConfig.fields.length
+      ? searchConfig.fields.filter((field) => config.fields.includes(field))
+      : config.fields
+
+  return searchFields.some((field) =>
     normalizeSearchText(record[field]).includes(normalizedQuery)
   )
+}
+
+function getDefaultSearchConfig(): SearchConfig {
+  return {
+    query: "",
+    mode: "all",
+    fields: [],
+  }
+}
+
+function getSearchConfig(
+  searchByCollection: Record<string, SearchConfig>,
+  collectionName: string
+) {
+  return searchByCollection[collectionName] ?? getDefaultSearchConfig()
+}
+
+function getPageNumbers(currentPage: number, totalPages: number) {
+  const maxVisiblePages = 7
+  if (totalPages <= maxVisiblePages) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1)
+  }
+
+  const halfWindow = Math.floor(maxVisiblePages / 2)
+  const startPage = Math.max(1, Math.min(currentPage - halfWindow, totalPages - maxVisiblePages + 1))
+  return Array.from({ length: maxVisiblePages }, (_, index) => startPage + index)
 }
 
 function validateRecord(
@@ -284,7 +346,9 @@ export default function MasterDataPage() {
   const [recordsByCollection, setRecordsByCollection] = useState<
     Record<string, DynamicMasterDataRecord[]>
   >({})
-  const [searchByCollection, setSearchByCollection] = useState<Record<string, string>>({})
+  const [searchByCollection, setSearchByCollection] = useState<Record<string, SearchConfig>>({})
+  const [pageSizeByCollection, setPageSizeByCollection] = useState<Record<string, number>>({})
+  const [pageByCollection, setPageByCollection] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [configDialogOpen, setConfigDialogOpen] = useState(false)
@@ -318,12 +382,6 @@ export default function MasterDataPage() {
   const activeRows = activeConfig
     ? recordsByCollection[activeConfig.collectionName] ?? []
     : []
-  const filteredRows = activeConfig
-    ? activeRows.filter((row) =>
-        matchesRecordSearch(activeConfig, row, searchByCollection[activeConfig.collectionName] ?? "")
-      )
-    : []
-
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
@@ -806,8 +864,33 @@ export default function MasterDataPage() {
           <div>
             {configs.map((config) => {
               const rows = recordsByCollection[config.collectionName] ?? []
-              const search = searchByCollection[config.collectionName] ?? ""
-              const visibleRows = rows.filter((row) => matchesRecordSearch(config, row, search))
+              const searchConfig = getSearchConfig(searchByCollection, config.collectionName)
+              const pageSize = pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
+              const visibleRows = rows.filter((row) =>
+                matchesRecordSearch(config, row, searchConfig)
+              )
+              const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize))
+              const requestedPage = pageByCollection[config.collectionName] ?? 1
+              const currentPage = Math.min(Math.max(requestedPage, 1), totalPages)
+              const pageStartIndex = (currentPage - 1) * pageSize
+              const paginatedRows = visibleRows.slice(pageStartIndex, pageStartIndex + pageSize)
+              const pageNumbers = getPageNumbers(currentPage, totalPages)
+              const selectedSearchFields = searchConfig.fields.filter((field) =>
+                config.fields.includes(field)
+              )
+              const selectedSearchLabel =
+                searchConfig.mode === "all"
+                  ? "すべての列"
+                  : selectedSearchFields.length === 1
+                    ? selectedSearchFields[0]
+                    : `${selectedSearchFields.length || config.fields.length} 列`
+              const goToPage = (page: number) => {
+                const nextPage = Math.min(Math.max(page, 1), totalPages)
+                setPageByCollection((current) => ({
+                  ...current,
+                  [config.collectionName]: nextPage,
+                }))
+              }
               if (config.collectionName !== activeCollection) return null
 
               return (
@@ -906,19 +989,88 @@ export default function MasterDataPage() {
                   </div>
 
                   <div className="border-b p-4">
-                    <div className="relative max-w-md">
-                      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        value={search}
-                        onChange={(event) =>
-                          setSearchByCollection((current) => ({
-                            ...current,
-                            [config.collectionName]: event.target.value,
-                          }))
-                        }
-                        className="pl-9"
-                        placeholder="検索..."
-                      />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="relative min-w-[240px] max-w-md flex-1">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          value={searchConfig.query}
+                          onChange={(event) => {
+                            const query = event.target.value
+                            setSearchByCollection((current) => ({
+                              ...current,
+                              [config.collectionName]: {
+                                ...getSearchConfig(current, config.collectionName),
+                                query,
+                              },
+                            }))
+                            setPageByCollection((current) => ({
+                              ...current,
+                              [config.collectionName]: 1,
+                            }))
+                          }}
+                          className="pl-9"
+                          placeholder="検索..."
+                        />
+                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button type="button" variant="outline" className="min-w-[150px] justify-start">
+                            <SlidersHorizontal className="size-4" />
+                            {selectedSearchLabel}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-64">
+                          <DropdownMenuLabel>検索対象</DropdownMenuLabel>
+                          <DropdownMenuCheckboxItem
+                            checked={searchConfig.mode === "all"}
+                            onCheckedChange={() => {
+                              setSearchByCollection((current) => ({
+                                ...current,
+                                [config.collectionName]: {
+                                  ...getSearchConfig(current, config.collectionName),
+                                  mode: "all",
+                                },
+                              }))
+                              setPageByCollection((current) => ({
+                                ...current,
+                                [config.collectionName]: 1,
+                              }))
+                            }}
+                          >
+                            すべての列
+                          </DropdownMenuCheckboxItem>
+                          <DropdownMenuSeparator />
+                          {config.fields.map((field) => (
+                            <DropdownMenuCheckboxItem
+                              key={field}
+                              checked={
+                                searchConfig.mode === "columns" &&
+                                selectedSearchFields.includes(field)
+                              }
+                              onSelect={(event) => event.preventDefault()}
+                              onCheckedChange={(checked) => {
+                                const nextFields = checked
+                                  ? [...new Set([...selectedSearchFields, field])]
+                                  : selectedSearchFields.filter((item) => item !== field)
+                                setSearchByCollection((current) => ({
+                                  ...current,
+                                  [config.collectionName]: {
+                                    ...getSearchConfig(current, config.collectionName),
+                                    mode: nextFields.length ? "columns" : "all",
+                                    fields: nextFields,
+                                  },
+                                }))
+                                setPageByCollection((current) => ({
+                                  ...current,
+                                  [config.collectionName]: 1,
+                                }))
+                              }}
+                            >
+                              {field}
+                            </DropdownMenuCheckboxItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                   </div>
 
@@ -933,8 +1085,8 @@ export default function MasterDataPage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {visibleRows.length ? (
-                          visibleRows.map((record) => (
+                        {paginatedRows.length ? (
+                          paginatedRows.map((record) => (
                             <TableRow key={getRecordId(config, record)}>
                               {config.fields.map((field) => (
                                 <TableCell key={field} className="max-w-[260px] truncate">
@@ -975,6 +1127,98 @@ export default function MasterDataPage() {
                         )}
                       </TableBody>
                     </Table>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t p-4 text-sm">
+                    <div className="flex flex-wrap items-center gap-3 text-muted-foreground">
+                      <div className="flex items-center gap-2">
+                        <span>表示件数</span>
+                        <Select
+                          value={String(pageSize)}
+                          onValueChange={(value) => {
+                            setPageSizeByCollection((current) => ({
+                              ...current,
+                              [config.collectionName]: Number(value),
+                            }))
+                            setPageByCollection((current) => ({
+                              ...current,
+                              [config.collectionName]: 1,
+                            }))
+                          }}
+                        >
+                          <SelectTrigger size="sm" className="w-[86px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PAGE_SIZE_OPTIONS.map((option) => (
+                              <SelectItem key={option} value={String(option)}>
+                                {option}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        {visibleRows.length
+                          ? `${pageStartIndex + 1}-${Math.min(
+                              pageStartIndex + pageSize,
+                              visibleRows.length
+                            )} / ${visibleRows.length} 件`
+                          : "0 / 0 件"}
+                      </div>
+                      <div>
+                        ページ {currentPage} / {totalPages}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1">
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        onClick={() => goToPage(1)}
+                        disabled={currentPage <= 1}
+                      >
+                        <ChevronsLeft className="size-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        onClick={() => goToPage(currentPage - 1)}
+                        disabled={currentPage <= 1}
+                      >
+                        <ChevronLeft className="size-4" />
+                      </Button>
+                      {pageNumbers.map((pageNumber) => (
+                        <Button
+                          key={pageNumber}
+                          type="button"
+                          size="sm"
+                          variant={pageNumber === currentPage ? "default" : "outline"}
+                          className="min-w-9"
+                          onClick={() => goToPage(pageNumber)}
+                        >
+                          {pageNumber}
+                        </Button>
+                      ))}
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        onClick={() => goToPage(currentPage + 1)}
+                        disabled={currentPage >= totalPages}
+                      >
+                        <ChevronRight className="size-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        onClick={() => goToPage(totalPages)}
+                        disabled={currentPage >= totalPages}
+                      >
+                        <ChevronsRight className="size-4" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
               )
