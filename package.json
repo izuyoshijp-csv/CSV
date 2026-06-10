@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "seed:firestore-configs": "node scripts/seed-firestore-configs.js",
-    "import:master-data": "node scripts/import-all-master-data.js"
+    "import:master-data": "node scripts/import-all-master-data.js",
+    "rebuild:masterdata-search-index": "node scripts/rebuild-masterdata-search-index.js"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

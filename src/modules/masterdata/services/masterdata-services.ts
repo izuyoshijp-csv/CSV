@@ -8,8 +8,10 @@ import {
   collection,
   deleteField,
   doc,
+  documentId,
   endAt,
   endBefore,
+  FieldPath,
   getCountFromServer,
   getDoc,
   getDocs,
@@ -110,6 +112,8 @@ const DEFAULT_BULK_IMPORT_BATCH_DELAY_MS = 250
 const DEFAULT_DOCUMENT_ID_LOOKUP_BATCH_SIZE = 20
 const DEFAULT_DOCUMENT_ID_LOOKUP_DELAY_MS = 150
 const DEFAULT_CONTAINS_SEARCH_BATCH_SIZE = 200
+export const MASTERDATA_SEARCH_INDEX_FIELD = "_searchTokensByField"
+const SEARCH_NGRAM_SIZE = 3
 
 export async function getCusCodeList(): Promise<CusCodeListItem[]> {
   return getFirestoreCollection<CusCodeListItem>("CusCodeList", emptyCusCodeData)
@@ -144,6 +148,42 @@ function mapDynamicMasterDataSnapshot(
     id: snapshot.id,
     ...snapshot.data(),
   } as DynamicMasterDataRecord
+}
+
+function normalizeSearchIndexText(value: unknown) {
+  return String(value ?? "").trim().toLowerCase()
+}
+
+export function buildMasterDataSearchTokens(value: unknown) {
+  const text = normalizeSearchIndexText(value)
+  if (!text) return []
+  if (text.length <= SEARCH_NGRAM_SIZE) return [text]
+
+  const tokens = new Set<string>()
+  for (let index = 0; index <= text.length - SEARCH_NGRAM_SIZE; index += 1) {
+    tokens.add(text.slice(index, index + SEARCH_NGRAM_SIZE))
+  }
+
+  return [...tokens]
+}
+
+export function buildMasterDataSearchTokensByField(
+  config: Pick<MasterCollectionConfig, "fields">,
+  record: DynamicMasterDataRecord
+) {
+  return Object.fromEntries(
+    config.fields.map((field) => [field, buildMasterDataSearchTokens(record[field])])
+  )
+}
+
+function withMasterDataSearchIndex(
+  config: Pick<MasterCollectionConfig, "fields">,
+  record: DynamicMasterDataRecord
+) {
+  return {
+    ...record,
+    [MASTERDATA_SEARCH_INDEX_FIELD]: buildMasterDataSearchTokensByField(config, record),
+  }
 }
 
 function getDynamicMasterDataQueryConstraints(
@@ -225,7 +265,19 @@ async function getDynamicMasterDataContainsPage(
 
   const pageSize = Math.max(1, options.pageSize)
   const collectionRef = collection(db, config.collectionName)
-  const orderField = getLookupKeyField(config) || "__name__"
+  const indexCondition = containsConditions[0]
+  const indexToken = buildMasterDataSearchTokens(indexCondition.value)[0]
+  if (!indexToken) {
+    return {
+      rows: [],
+      totalCount: null,
+      firstCursor: null,
+      lastCursor: null,
+      hasPreviousPage: false,
+      hasNextPage: false,
+    }
+  }
+
   const batchSize = Math.max(pageSize, DEFAULT_CONTAINS_SEARCH_BATCH_SIZE)
   const direction = options.direction ?? "first"
   const rows: DynamicMasterDataRecord[] = []
@@ -235,7 +287,14 @@ async function getDynamicMasterDataContainsPage(
   let reachedBoundary = false
 
   while (true) {
-    const constraints: QueryConstraint[] = [orderBy(orderField)]
+    const constraints: QueryConstraint[] = [
+      where(
+        new FieldPath(MASTERDATA_SEARCH_INDEX_FIELD, indexCondition.field),
+        "array-contains",
+        indexToken
+      ),
+      orderBy(documentId()),
+    ]
 
     if ((direction === "next" || direction === "first") && scanCursor) {
       constraints.push(startAfter(scanCursor))
@@ -543,13 +602,13 @@ export async function createDynamicMasterDataRecord(
     ? makeSafeDocumentId(options.documentId)
     : await getNextDynamicMasterDocumentId(config, baseDocumentId)
   return service.create(
-    {
+    withMasterDataSearchIndex(config, {
       ...record,
       [lookupKeyField]: lookupKey,
       id: documentId,
       documentId,
       baseDocumentId,
-    },
+    }),
     documentId
   )
 }
@@ -601,14 +660,14 @@ export async function createDynamicMasterDataRecords(
 
       batch.set(
         documentRef,
-        {
+        withMasterDataSearchIndex(config, {
           ...recordData,
           [lookupKeyField]: lookupKey,
           documentId,
           baseDocumentId,
           createdAt: record.createdAt ?? serverTimestamp(),
           updatedAt: serverTimestamp(),
-        },
+        }),
         { merge: true }
       )
     })
@@ -646,12 +705,12 @@ export async function updateDynamicMasterDataRecord(
     throw new Error("Lookup key cannot be changed. Create a new record instead.")
   }
 
-  return service.update(id, {
+  return service.update(id, withMasterDataSearchIndex(config, {
     ...record,
     [lookupKeyField]: currentKey,
     documentId: id,
     baseDocumentId,
-  })
+  }))
 }
 
 export async function deleteDynamicMasterDataRecord(
