@@ -458,6 +458,7 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
+    void loadActivePage("first")
   }
 
   function clearSearchDraft(config: MasterCollectionConfig) {
@@ -474,6 +475,7 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
+    void loadActivePage("first")
   }
 
   function openNewConfigDialog() {
