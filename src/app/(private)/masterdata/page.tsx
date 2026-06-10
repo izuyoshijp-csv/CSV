@@ -74,6 +74,7 @@ import {
   getNextDynamicMasterDocumentIds,
   type DynamicMasterDataPageCursor,
   type DynamicMasterDataRecord,
+  type DynamicMasterDataSearchCondition,
   updateDynamicMasterDataRecord,
 } from "@/modules/masterdata/services/masterdata-services"
 import {
@@ -88,9 +89,11 @@ const PAGE_SIZE_OPTIONS = [20, 30, 50] as const
 
 type RecordDialogMode = "create" | "edit"
 type FieldDraft = MasterCollectionFieldConfig
+type SearchCondition = DynamicMasterDataSearchCondition & {
+  id: string
+}
 type SearchConfig = {
-  query: string
-  field: string
+  conditions: SearchCondition[]
 }
 type PageMeta = {
   totalCount: number
@@ -174,10 +177,18 @@ function getRecordId(config: MasterCollectionConfig, record: DynamicMasterDataRe
   return normalizeText(record.id) || getLookupKeyValue(config, record)
 }
 
+function createSearchCondition(config?: MasterCollectionConfig | null): SearchCondition {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    field: config ? getLookupKeyField(config) : "",
+    operator: "equals",
+    value: "",
+  }
+}
+
 function getDefaultSearchConfig(config?: MasterCollectionConfig | null): SearchConfig {
   return {
-    query: "",
-    field: config ? getLookupKeyField(config) : "",
+    conditions: [createSearchCondition(config)],
   }
 }
 
@@ -186,10 +197,33 @@ function getSearchConfig(
   config: MasterCollectionConfig
 ) {
   const current = searchByCollection[config.collectionName] ?? getDefaultSearchConfig(config)
+  const conditions = current.conditions.length ? current.conditions : [createSearchCondition(config)]
+
   return {
-    query: current.query,
-    field: config.fields.includes(current.field) ? current.field : getLookupKeyField(config),
+    conditions: conditions.map((condition) => ({
+      ...condition,
+      field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
+    })),
   }
+}
+
+function getAppliedSearchConditions(config: MasterCollectionConfig, searchConfig: SearchConfig) {
+  let hasPrefixCondition = false
+
+  return searchConfig.conditions
+    .map((condition) => ({
+      field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
+      operator: condition.operator,
+      value: normalizeText(condition.value),
+    }))
+    .filter((condition) => {
+      if (!condition.value) return false
+      if (condition.operator === "prefix") {
+        if (hasPrefixCondition) return false
+        hasPrefixCondition = true
+      }
+      return true
+    })
 }
 
 function validateRecord(
@@ -271,6 +305,9 @@ export default function MasterDataPage() {
   >({})
   const [pageMetaByCollection, setPageMetaByCollection] = useState<Record<string, PageMeta>>({})
   const [searchByCollection, setSearchByCollection] = useState<Record<string, SearchConfig>>({})
+  const [searchDraftByCollection, setSearchDraftByCollection] = useState<
+    Record<string, SearchConfig>
+  >({})
   const [pageSizeByCollection, setPageSizeByCollection] = useState<Record<string, number>>({})
   const [pageByCollection, setPageByCollection] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
@@ -328,17 +365,13 @@ export default function MasterDataPage() {
       setTableLoading(true)
       try {
         const searchConfig = getSearchConfig(searchByCollection, activeConfig)
+        const appliedConditions = getAppliedSearchConditions(activeConfig, searchConfig)
         const pageSize = pageSizeByCollection[activeConfig.collectionName] ?? DEFAULT_PAGE_SIZE
         const page = await getDynamicMasterDataPage(activeConfig, {
           pageSize,
           direction,
           cursor,
-          search: searchConfig.query
-            ? {
-                field: searchConfig.field,
-                query: searchConfig.query,
-              }
-            : undefined,
+          search: appliedConditions.length ? { conditions: appliedConditions } : undefined,
         })
         const totalPages = Math.max(1, Math.ceil(page.totalCount / pageSize))
 
@@ -389,6 +422,44 @@ export default function MasterDataPage() {
   useEffect(() => {
     void loadActivePage("first")
   }, [loadActivePage])
+
+  function updateSearchDraft(
+    config: MasterCollectionConfig,
+    updater: (current: SearchConfig) => SearchConfig
+  ) {
+    setSearchDraftByCollection((current) => ({
+      ...current,
+      [config.collectionName]: updater(getSearchConfig(current, config)),
+    }))
+  }
+
+  function applySearchDraft(config: MasterCollectionConfig) {
+    const draft = getSearchConfig(searchDraftByCollection, config)
+    setSearchByCollection((current) => ({
+      ...current,
+      [config.collectionName]: draft,
+    }))
+    setPageByCollection((current) => ({
+      ...current,
+      [config.collectionName]: 1,
+    }))
+  }
+
+  function clearSearchDraft(config: MasterCollectionConfig) {
+    const emptySearch = getDefaultSearchConfig(config)
+    setSearchDraftByCollection((current) => ({
+      ...current,
+      [config.collectionName]: emptySearch,
+    }))
+    setSearchByCollection((current) => ({
+      ...current,
+      [config.collectionName]: emptySearch,
+    }))
+    setPageByCollection((current) => ({
+      ...current,
+      [config.collectionName]: 1,
+    }))
+  }
 
   function openNewConfigDialog() {
     setEditingConfig(null)
@@ -835,6 +906,11 @@ export default function MasterDataPage() {
                 hasNextPage: false,
               }
               const searchConfig = getSearchConfig(searchByCollection, config)
+              const searchDraft = getSearchConfig(searchDraftByCollection, config)
+              const appliedConditionCount = getAppliedSearchConditions(config, searchConfig).length
+              const prefixDraftCount = searchDraft.conditions.filter((condition) => {
+                return condition.operator === "prefix" && normalizeText(condition.value)
+              }).length
               const pageSize = pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
               const totalPages = Math.max(1, Math.ceil(pageMeta.totalCount / pageSize))
               const requestedPage = pageByCollection[config.collectionName] ?? 1
@@ -937,56 +1013,138 @@ export default function MasterDataPage() {
                     </div>
                   </div>
 
-                  <div className="border-b p-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Select
-                        value={searchConfig.field}
-                        onValueChange={(field) => {
-                          setSearchByCollection((current) => ({
-                            ...current,
-                            [config.collectionName]: {
-                              ...getSearchConfig(current, config),
-                              field,
-                            },
-                          }))
-                          setPageByCollection((current) => ({
-                            ...current,
-                            [config.collectionName]: 1,
-                          }))
-                        }}
-                      >
-                        <SelectTrigger className="w-[180px]">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {config.fields.map((field) => (
-                            <SelectItem key={field} value={field}>
-                              {field}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <div className="relative min-w-[240px] max-w-md flex-1">
-                        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                        <Input
-                          value={searchConfig.query}
-                          onChange={(event) => {
-                            const query = event.target.value
-                            setSearchByCollection((current) => ({
+                  <div className="grid gap-3 border-b p-4">
+                    <div className="grid gap-2">
+                      {searchDraft.conditions.map((condition, conditionIndex) => (
+                        <div
+                          key={condition.id}
+                          className="grid gap-2 lg:grid-cols-[minmax(160px,220px)_140px_minmax(220px,1fr)_auto]"
+                        >
+                          <Select
+                            value={condition.field}
+                            onValueChange={(field) => {
+                              updateSearchDraft(config, (current) => ({
+                                ...current,
+                                conditions: current.conditions.map((item) =>
+                                  item.id === condition.id ? { ...item, field } : item
+                                ),
+                              }))
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {config.fields.map((field) => (
+                                <SelectItem key={field} value={field}>
+                                  {field}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Select
+                            value={condition.operator}
+                            onValueChange={(operator: "equals" | "prefix") => {
+                              updateSearchDraft(config, (current) => ({
+                                ...current,
+                                conditions: current.conditions.map((item) =>
+                                  item.id === condition.id ? { ...item, operator } : item
+                                ),
+                              }))
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="equals">=</SelectItem>
+                              <SelectItem value="prefix">前方一致</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <div className="relative">
+                            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                            <Input
+                              value={condition.value}
+                              onChange={(event) => {
+                                const value = event.target.value
+                                updateSearchDraft(config, (current) => ({
+                                  ...current,
+                                  conditions: current.conditions.map((item) =>
+                                    item.id === condition.id ? { ...item, value } : item
+                                  ),
+                                }))
+                              }}
+                              className="pl-9"
+                              placeholder={
+                                condition.operator === "prefix" ? "前方一致で検索..." : "完全一致で検索..."
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") applySearchDraft(config)
+                              }}
+                            />
+                          </div>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="outline"
+                            onClick={() => {
+                              updateSearchDraft(config, (current) => {
+                                const nextConditions = current.conditions.filter(
+                                  (item) => item.id !== condition.id
+                                )
+                                return {
+                                  ...current,
+                                  conditions: nextConditions.length
+                                    ? nextConditions
+                                    : [createSearchCondition(config)],
+                                }
+                              })
+                            }}
+                            disabled={searchDraft.conditions.length <= 1 && conditionIndex === 0}
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            updateSearchDraft(config, (current) => ({
                               ...current,
-                              [config.collectionName]: {
-                                ...getSearchConfig(current, config),
-                                query,
-                              },
-                            }))
-                            setPageByCollection((current) => ({
-                              ...current,
-                              [config.collectionName]: 1,
+                              conditions: [...current.conditions, createSearchCondition(config)],
                             }))
                           }}
-                          className="pl-9"
-                          placeholder="前方一致で検索..."
-                        />
+                        >
+                          <Plus className="size-4" />
+                          条件追加
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => applySearchDraft(config)}
+                          disabled={tableLoading}
+                        >
+                          <Search className="size-4" />
+                          検索
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => clearSearchDraft(config)}
+                          disabled={tableLoading}
+                        >
+                          クリア
+                        </Button>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        適用中: {appliedConditionCount} 条件
+                        {prefixDraftCount > 1 ? " / 前方一致は最初の1条件のみ適用" : ""}
                       </div>
                     </div>
                   </div>

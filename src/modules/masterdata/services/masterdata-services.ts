@@ -72,8 +72,13 @@ export type DynamicMasterDataRecord = {
 }
 
 export type DynamicMasterDataSearchOptions = {
-  field?: string
-  query?: string
+  conditions?: DynamicMasterDataSearchCondition[]
+}
+
+export type DynamicMasterDataSearchCondition = {
+  field: string
+  operator: "equals" | "prefix"
+  value: string
 }
 
 export type DynamicMasterDataPageCursor = QueryDocumentSnapshot<DocumentData> | null
@@ -144,12 +149,29 @@ function getDynamicMasterDataQueryConstraints(
   config: MasterCollectionConfig,
   search: DynamicMasterDataSearchOptions = {}
 ) {
-  const queryText = String(search.query ?? "").trim()
-  const orderField = queryText ? search.field || getLookupKeyField(config) : getLookupKeyField(config)
-  const constraints: QueryConstraint[] = [orderBy(orderField || "__name__")]
+  const conditions = (search.conditions ?? [])
+    .map((condition) => ({
+      ...condition,
+      value: String(condition.value ?? "").trim(),
+    }))
+    .filter((condition) => {
+      return Boolean(condition.value) && config.fields.includes(condition.field)
+    })
+  const prefixCondition = conditions.find((condition) => condition.operator === "prefix")
+  const equalsConditions = conditions.filter((condition) => {
+    return condition.operator === "equals" && condition.field !== prefixCondition?.field
+  })
+  const orderField = prefixCondition?.field || getLookupKeyField(config)
+  const constraints: QueryConstraint[] = []
 
-  if (queryText) {
-    constraints.push(startAt(queryText), endAt(`${queryText}\uf8ff`))
+  equalsConditions.forEach((condition) => {
+    constraints.push(where(condition.field, "==", condition.value))
+  })
+
+  constraints.push(orderBy(orderField || "__name__"))
+
+  if (prefixCondition) {
+    constraints.push(startAt(prefixCondition.value), endAt(`${prefixCondition.value}\uf8ff`))
   }
 
   return constraints
