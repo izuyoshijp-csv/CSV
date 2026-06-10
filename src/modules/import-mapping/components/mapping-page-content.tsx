@@ -955,25 +955,6 @@ function EntryDetailFields({
                   placeholder="R"
                 />
               </Field>
-              <Field label="開始行" messages={getIssueMessages(issues, "startRow", entry.id)}>
-                <Input
-                  value={String(entry.startRow ?? "")}
-                  onChange={(event) =>
-                    onChange({ startRow: Number(event.target.value) })
-                  }
-                  inputMode="numeric"
-                  placeholder="17"
-                />
-              </Field>
-              <Field label="終了判定列" messages={getIssueMessages(issues, "endDetectionColumn", entry.id)}>
-                <Input
-                  value={entry.endDetectionColumn ?? ""}
-                  onChange={(event) =>
-                    onChange({ endDetectionColumn: event.target.value.toUpperCase() })
-                  }
-                  placeholder="R"
-                />
-              </Field>
             </div>
           ) : null}
 
@@ -1500,7 +1481,7 @@ function buildEntrySummary(entry: ImportMappingEntry) {
     }
     if (entry.orderFileMode === "detailColumn") {
       return withFormatSummary(
-        `明細列 ${entry.sourceColumn || "未設定"} / 開始行 ${entry.startRow ?? "未設定"} / 判定列 ${entry.endDetectionColumn || "未設定"} → ${targets}`,
+        `明細列 ${entry.sourceColumn || "未設定"} → ${targets}`,
         entry
       )
     }
@@ -1536,7 +1517,7 @@ function buildEntrySummaryForColumn(entry: ImportMappingEntry, targetColumn: Csv
     }
     if (entry.orderFileMode === "detailColumn") {
       return withFormatSummary(
-        `明細列 ${entry.sourceColumn || "未設定"}\n開始行 ${entry.startRow ?? "未設定"}\n判定列 ${entry.endDetectionColumn || "未設定"} → ${targetColumn}`,
+        `明細列 ${entry.sourceColumn || "未設定"} → ${targetColumn}`,
         entry
       )
     }

@@ -99,24 +99,6 @@ function validateEntry(entry: ImportMappingEntry, index: number) {
         })
       }
 
-      if (!Number.isInteger(entry.startRow) || Number(entry.startRow) < 1) {
-        addIssue(issues, {
-          field: `${prefix}.startRow`,
-          entryId: entry.id,
-          message: "開始行は1以上の整数で入力してください。",
-        })
-      }
-
-      if (
-        !hasValue(entry.endDetectionColumn) ||
-        !isExcelColumn(String(entry.endDetectionColumn))
-      ) {
-        addIssue(issues, {
-          field: `${prefix}.endDetectionColumn`,
-          entryId: entry.id,
-          message: "終了判定列はExcelの列名で入力してください。",
-        })
-      }
     }
 
     if (entry.orderFileMode === "sourceFormula") {
