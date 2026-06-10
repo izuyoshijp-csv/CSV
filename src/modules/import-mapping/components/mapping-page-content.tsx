@@ -1306,6 +1306,8 @@ function PreviewDialog({
         name: entry.targetColumnName,
         method: dataSourceLabels[entry.dataSource],
         summary: buildEntrySummaryForColumn(entry, column),
+        hideInCompactView: Boolean(entry.hideInCompactView),
+        includeInCsvDownload: entry.includeInCsvDownload !== false,
       }))
     )
   }, [mapping])
@@ -1318,6 +1320,8 @@ function PreviewDialog({
       previewColumns.map((item) => item.name || ""),
       previewColumns.map((item) => item.summary),
       previewColumns.map((item) => item.method),
+      previewColumns.map((item) => (item.hideInCompactView ? "はい" : "いいえ")),
+      previewColumns.map((item) => (item.includeInCsvDownload ? "はい" : "いいえ")),
     ])
 
     const range = XLSX.utils.decode_range(worksheet["!ref"] ?? "A1:A1")
@@ -1333,7 +1337,14 @@ function PreviewDialog({
     }
 
     worksheet["!cols"] = previewColumns.map(() => ({ wch: 18 }))
-    worksheet["!rows"] = [{ hpt: 18 }, { hpt: 44 }, { hpt: 88 }, { hpt: 32 }]
+    worksheet["!rows"] = [
+      { hpt: 18 },
+      { hpt: 44 },
+      { hpt: 88 },
+      { hpt: 32 },
+      { hpt: 28 },
+      { hpt: 28 },
+    ]
 
     const workbook = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(workbook, worksheet, "プレビュー")
@@ -1399,9 +1410,27 @@ function PreviewDialog({
               {previewColumns.map((item) => (
                 <div
                   key={`method-${item.column}`}
-                  className="min-h-10 whitespace-pre-wrap break-words border-r bg-muted/30 px-2 py-2 text-xs text-muted-foreground"
+                  className="min-h-10 whitespace-pre-wrap break-words border-b border-r bg-muted/30 px-2 py-2 text-xs text-muted-foreground"
                 >
                   {item.method}
+                </div>
+              ))}
+              {previewColumns.map((item) => (
+                <div
+                  key={`compact-${item.column}`}
+                  className="min-h-10 whitespace-pre-wrap break-words border-b border-r bg-white px-2 py-2 text-xs leading-relaxed"
+                >
+                  <span className="text-muted-foreground">簡易表示で非表示: </span>
+                  {item.hideInCompactView ? "はい" : "いいえ"}
+                </div>
+              ))}
+              {previewColumns.map((item) => (
+                <div
+                  key={`download-${item.column}`}
+                  className="min-h-10 whitespace-pre-wrap break-words border-r bg-white px-2 py-2 text-xs leading-relaxed"
+                >
+                  <span className="text-muted-foreground">CSVダウンロード時に表示: </span>
+                  {item.includeInCsvDownload ? "はい" : "いいえ"}
                 </div>
               ))}
             </div>
