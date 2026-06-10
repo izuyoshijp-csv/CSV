@@ -8,13 +8,23 @@ import {
   collection,
   deleteField,
   doc,
+  endAt,
+  endBefore,
+  getCountFromServer,
   getDoc,
   getDocs,
+  limit,
+  limitToLast,
+  orderBy,
   query,
+  startAfter,
+  startAt,
   serverTimestamp,
   where,
   writeBatch,
   type DocumentData,
+  type QueryConstraint,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore"
 import type { MasterCollectionConfig } from "@/types/firestore-models"
 
@@ -61,6 +71,29 @@ export type DynamicMasterDataRecord = {
   [key: string]: unknown
 }
 
+export type DynamicMasterDataSearchOptions = {
+  field?: string
+  query?: string
+}
+
+export type DynamicMasterDataPageCursor = QueryDocumentSnapshot<DocumentData> | null
+
+export type DynamicMasterDataPageOptions = {
+  pageSize: number
+  direction?: "first" | "next" | "previous" | "last"
+  cursor?: DynamicMasterDataPageCursor
+  search?: DynamicMasterDataSearchOptions
+}
+
+export type DynamicMasterDataPage = {
+  rows: DynamicMasterDataRecord[]
+  totalCount: number
+  firstCursor: DynamicMasterDataPageCursor
+  lastCursor: DynamicMasterDataPageCursor
+  hasPreviousPage: boolean
+  hasNextPage: boolean
+}
+
 const emptyCusCodeData: CusCodeListItem[] = []
 const emptyItemCodeData: ItemCodeListItem[] = []
 const emptyUnitPriceData: UnitPriceListItem[] = []
@@ -96,6 +129,77 @@ export async function getDynamicMasterData(
   config: MasterCollectionConfig
 ): Promise<DynamicMasterDataRecord[]> {
   return getFirestoreCollection<DynamicMasterDataRecord>(config.collectionName, [])
+}
+
+function mapDynamicMasterDataSnapshot(
+  snapshot: QueryDocumentSnapshot<DocumentData>
+): DynamicMasterDataRecord {
+  return {
+    id: snapshot.id,
+    ...snapshot.data(),
+  } as DynamicMasterDataRecord
+}
+
+function getDynamicMasterDataQueryConstraints(
+  config: MasterCollectionConfig,
+  search: DynamicMasterDataSearchOptions = {}
+) {
+  const queryText = String(search.query ?? "").trim()
+  const orderField = queryText ? search.field || getLookupKeyField(config) : getLookupKeyField(config)
+  const constraints: QueryConstraint[] = [orderBy(orderField || "__name__")]
+
+  if (queryText) {
+    constraints.push(startAt(queryText), endAt(`${queryText}\uf8ff`))
+  }
+
+  return constraints
+}
+
+export async function getDynamicMasterDataPage(
+  config: MasterCollectionConfig,
+  options: DynamicMasterDataPageOptions
+): Promise<DynamicMasterDataPage> {
+  const db = getFirestoreSafe()
+  if (!db) {
+    throw new Error(
+      "Firebase is not configured. Please set NEXT_PUBLIC_FIREBASE_* environment variables."
+    )
+  }
+
+  const pageSize = Math.max(1, options.pageSize)
+  const collectionRef = collection(db, config.collectionName)
+  const baseConstraints = getDynamicMasterDataQueryConstraints(config, options.search)
+  const countQuery = query(collectionRef, ...baseConstraints)
+  const pageConstraints = [...baseConstraints]
+
+  if (options.direction === "next" && options.cursor) {
+    pageConstraints.push(startAfter(options.cursor), limit(pageSize))
+  } else if (options.direction === "previous" && options.cursor) {
+    pageConstraints.push(endBefore(options.cursor), limitToLast(pageSize))
+  } else if (options.direction === "last") {
+    pageConstraints.push(limitToLast(pageSize))
+  } else {
+    pageConstraints.push(limit(pageSize))
+  }
+
+  const [countSnapshot, pageSnapshot] = await Promise.all([
+    getCountFromServer(countQuery),
+    getDocs(query(collectionRef, ...pageConstraints)),
+  ])
+  const documents = pageSnapshot.docs
+
+  return {
+    rows: documents.map(mapDynamicMasterDataSnapshot),
+    totalCount: countSnapshot.data().count,
+    firstCursor: documents[0] ?? null,
+    lastCursor: documents[documents.length - 1] ?? null,
+    hasPreviousPage:
+      options.direction === "last" ||
+      options.direction === "previous" ||
+      (options.direction === "next" && Boolean(options.cursor)),
+    hasNextPage:
+      options.direction !== "last" && documents.length === pageSize,
+  }
 }
 
 export async function getDynamicMasterDataByKeys(

@@ -13,7 +13,6 @@ import {
   Pencil,
   Plus,
   Search,
-  SlidersHorizontal,
   Trash2,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -41,10 +40,8 @@ import {
 } from "@/components/ui/dialog"
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -73,7 +70,9 @@ import {
   deleteAllDynamicMasterDataRecords,
   deleteDynamicMasterDataRecord,
   getDynamicMasterData,
+  getDynamicMasterDataPage,
   getNextDynamicMasterDocumentIds,
+  type DynamicMasterDataPageCursor,
   type DynamicMasterDataRecord,
   updateDynamicMasterDataRecord,
 } from "@/modules/masterdata/services/masterdata-services"
@@ -89,11 +88,16 @@ const PAGE_SIZE_OPTIONS = [20, 30, 50] as const
 
 type RecordDialogMode = "create" | "edit"
 type FieldDraft = MasterCollectionFieldConfig
-type SearchMode = "all" | "columns"
 type SearchConfig = {
   query: string
-  mode: SearchMode
-  fields: string[]
+  field: string
+}
+type PageMeta = {
+  totalCount: number
+  firstCursor: DynamicMasterDataPageCursor
+  lastCursor: DynamicMasterDataPageCursor
+  hasPreviousPage: boolean
+  hasNextPage: boolean
 }
 type ImportProgressState = {
   open: boolean
@@ -116,10 +120,6 @@ function notifyMasterDataChanged() {
 
 function normalizeText(value: unknown) {
   return String(value ?? "").trim()
-}
-
-function normalizeSearchText(value: unknown) {
-  return normalizeText(value).toLowerCase()
 }
 
 function normalizeFieldDrafts(fields: FieldDraft[]) {
@@ -174,47 +174,22 @@ function getRecordId(config: MasterCollectionConfig, record: DynamicMasterDataRe
   return normalizeText(record.id) || getLookupKeyValue(config, record)
 }
 
-function matchesRecordSearch(
-  config: MasterCollectionConfig,
-  record: DynamicMasterDataRecord,
-  searchConfig: SearchConfig
-) {
-  const normalizedQuery = normalizeSearchText(searchConfig.query)
-  if (!normalizedQuery) return true
-  const searchFields =
-    searchConfig.mode === "columns" && searchConfig.fields.length
-      ? searchConfig.fields.filter((field) => config.fields.includes(field))
-      : config.fields
-
-  return searchFields.some((field) =>
-    normalizeSearchText(record[field]).includes(normalizedQuery)
-  )
-}
-
-function getDefaultSearchConfig(): SearchConfig {
+function getDefaultSearchConfig(config?: MasterCollectionConfig | null): SearchConfig {
   return {
     query: "",
-    mode: "all",
-    fields: [],
+    field: config ? getLookupKeyField(config) : "",
   }
 }
 
 function getSearchConfig(
   searchByCollection: Record<string, SearchConfig>,
-  collectionName: string
+  config: MasterCollectionConfig
 ) {
-  return searchByCollection[collectionName] ?? getDefaultSearchConfig()
-}
-
-function getPageNumbers(currentPage: number, totalPages: number) {
-  const maxVisiblePages = 7
-  if (totalPages <= maxVisiblePages) {
-    return Array.from({ length: totalPages }, (_, index) => index + 1)
+  const current = searchByCollection[config.collectionName] ?? getDefaultSearchConfig(config)
+  return {
+    query: current.query,
+    field: config.fields.includes(current.field) ? current.field : getLookupKeyField(config),
   }
-
-  const halfWindow = Math.floor(maxVisiblePages / 2)
-  const startPage = Math.max(1, Math.min(currentPage - halfWindow, totalPages - maxVisiblePages + 1))
-  return Array.from({ length: maxVisiblePages }, (_, index) => startPage + index)
 }
 
 function validateRecord(
@@ -230,58 +205,6 @@ function validateRecord(
   }
 
   return errors
-}
-
-type DuplicateFieldWarning = {
-  field: string
-  value: string
-}
-
-function collectDuplicateFieldWarnings(
-  config: MasterCollectionConfig,
-  recordsToSave: DynamicMasterDataRecord[],
-  existingRows: DynamicMasterDataRecord[],
-  excludeId = ""
-) {
-  const warningsByKey = new Map<string, DuplicateFieldWarning>()
-  const valuesByField = new Map<string, Set<string>>()
-
-  config.fields.forEach((field) => {
-    const values = new Set<string>()
-    existingRows.forEach((row) => {
-      if (excludeId && getRecordId(config, row) === excludeId) return
-      const value = normalizeText(row[field])
-      if (value) values.add(value)
-    })
-    valuesByField.set(field, values)
-  })
-
-  recordsToSave.forEach((record) => {
-    config.fields.forEach((field) => {
-      const value = normalizeText(record[field])
-      if (!value) return
-
-      const existingValues = valuesByField.get(field) ?? new Set<string>()
-      if (existingValues.has(value)) {
-        warningsByKey.set(`${field}\u0000${value}`, { field, value })
-      }
-      existingValues.add(value)
-      valuesByField.set(field, existingValues)
-    })
-  })
-
-  return [...warningsByKey.values()]
-}
-
-function getDuplicateFieldWarningMessage(warnings: DuplicateFieldWarning[]) {
-  if (!warnings.length) return ""
-
-  const preview = warnings
-    .slice(0, 8)
-    .map((warning) => `${warning.field}: ${warning.value}`)
-    .join("\n")
-  const extraCount = warnings.length > 8 ? `\n...他 ${warnings.length - 8} 件` : ""
-  return `既に存在する内容があります。\n${preview}${extraCount}\n保存しますか？`
 }
 
 function exportRows(
@@ -346,10 +269,12 @@ export default function MasterDataPage() {
   const [recordsByCollection, setRecordsByCollection] = useState<
     Record<string, DynamicMasterDataRecord[]>
   >({})
+  const [pageMetaByCollection, setPageMetaByCollection] = useState<Record<string, PageMeta>>({})
   const [searchByCollection, setSearchByCollection] = useState<Record<string, SearchConfig>>({})
   const [pageSizeByCollection, setPageSizeByCollection] = useState<Record<string, number>>({})
   const [pageByCollection, setPageByCollection] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
+  const [tableLoading, setTableLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [configDialogOpen, setConfigDialogOpen] = useState(false)
   const [editingConfig, setEditingConfig] = useState<MasterCollectionConfig | null>(null)
@@ -379,25 +304,12 @@ export default function MasterDataPage() {
     () => configs.find((config) => config.collectionName === activeCollection) ?? null,
     [activeCollection, configs]
   )
-  const activeRows = activeConfig
-    ? recordsByCollection[activeConfig.collectionName] ?? []
-    : []
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
       const nextConfigs = await masterCollectionConfigRepository.list()
       setConfigs(nextConfigs)
       setActiveCollection((current) => current || nextConfigs[0]?.collectionName || "")
-
-      const nextRecords = Object.fromEntries(
-        await Promise.all(
-          nextConfigs.map(async (config) => [
-            config.collectionName,
-            await getDynamicMasterData(config),
-          ])
-        )
-      ) as Record<string, DynamicMasterDataRecord[]>
-      setRecordsByCollection(nextRecords)
     } catch (error) {
       console.error(error)
       toast.error("マスタデータを読み込めませんでした。")
@@ -406,9 +318,77 @@ export default function MasterDataPage() {
     }
   }, [])
 
+  const loadActivePage = useCallback(
+    async (
+      direction: "first" | "next" | "previous" | "last" = "first",
+      cursor?: DynamicMasterDataPageCursor
+    ) => {
+      if (!activeConfig) return
+
+      setTableLoading(true)
+      try {
+        const searchConfig = getSearchConfig(searchByCollection, activeConfig)
+        const pageSize = pageSizeByCollection[activeConfig.collectionName] ?? DEFAULT_PAGE_SIZE
+        const page = await getDynamicMasterDataPage(activeConfig, {
+          pageSize,
+          direction,
+          cursor,
+          search: searchConfig.query
+            ? {
+                field: searchConfig.field,
+                query: searchConfig.query,
+              }
+            : undefined,
+        })
+        const totalPages = Math.max(1, Math.ceil(page.totalCount / pageSize))
+
+        setRecordsByCollection((current) => ({
+          ...current,
+          [activeConfig.collectionName]: page.rows,
+        }))
+        setPageMetaByCollection((current) => ({
+          ...current,
+          [activeConfig.collectionName]: {
+            totalCount: page.totalCount,
+            firstCursor: page.firstCursor,
+            lastCursor: page.lastCursor,
+            hasPreviousPage: page.hasPreviousPage,
+            hasNextPage: page.hasNextPage,
+          },
+        }))
+        setPageByCollection((current) => {
+          const currentPage = current[activeConfig.collectionName] ?? 1
+          const nextPage =
+            direction === "next"
+              ? Math.min(currentPage + 1, totalPages)
+              : direction === "previous"
+                ? Math.max(currentPage - 1, 1)
+                : direction === "last"
+                  ? totalPages
+                  : 1
+
+          return {
+            ...current,
+            [activeConfig.collectionName]: nextPage,
+          }
+        })
+      } catch (error) {
+        console.error(error)
+        toast.error("マスタデータを読み込めませんでした。")
+      } finally {
+        setTableLoading(false)
+      }
+    },
+    [activeConfig, pageSizeByCollection, searchByCollection]
+  )
+
   useEffect(() => {
     void loadData()
   }, [loadData])
+
+  useEffect(() => {
+    void loadActivePage("first")
+  }, [loadActivePage])
 
   function openNewConfigDialog() {
     setEditingConfig(null)
@@ -616,20 +596,6 @@ export default function MasterDataPage() {
         toast.error(errors[0])
         return
       }
-      const duplicateWarnings = collectDuplicateFieldWarnings(
-        activeConfig,
-        [normalizedRecord],
-        activeRows,
-        recordDialogMode === "edit" ? editingRecordId : ""
-      )
-      const duplicateWarningMessage = getDuplicateFieldWarningMessage(duplicateWarnings)
-      if (
-        duplicateWarningMessage &&
-        !(await confirmDialog.confirm({ description: duplicateWarningMessage }))
-      ) {
-        return
-      }
-
       if (recordDialogMode === "create") {
         await createDynamicMasterDataRecord(activeConfig, normalizedRecord)
       } else {
@@ -638,7 +604,7 @@ export default function MasterDataPage() {
 
       notifyMasterDataChanged()
       setRecordDialogOpen(false)
-      await loadData()
+      await loadActivePage("first")
       toast.success("マスタデータを保存しました。")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存に失敗しました。")
@@ -654,7 +620,7 @@ export default function MasterDataPage() {
       await deleteDynamicMasterDataRecord(activeConfig, getRecordId(activeConfig, deleteTarget))
       notifyMasterDataChanged()
       setDeleteTarget(null)
-      await loadData()
+      await loadActivePage("first")
       toast.success("マスタデータを削除しました。")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "削除に失敗しました。")
@@ -670,7 +636,7 @@ export default function MasterDataPage() {
       const deletedCount = await deleteAllDynamicMasterDataRecords(deleteAllTarget)
       notifyMasterDataChanged()
       setDeleteAllTarget(null)
-      await loadData()
+      await loadActivePage("first")
       toast.success(`${deletedCount} 件のデータを削除しました。`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "削除に失敗しました。")
@@ -707,20 +673,6 @@ export default function MasterDataPage() {
         }
         validRows.push(row)
       }
-      const duplicateWarnings = collectDuplicateFieldWarnings(
-        activeConfig,
-        validRows,
-        activeRows
-      )
-      const duplicateWarningMessage = getDuplicateFieldWarningMessage(duplicateWarnings)
-      if (
-        duplicateWarningMessage &&
-        !(await confirmDialog.confirm({ description: duplicateWarningMessage }))
-      ) {
-        setImportProgress((current) => ({ ...current, open: false, status: "idle" }))
-        return
-      }
-
       const lookupKeyField = getLookupKeyField(activeConfig)
       setImportProgress({
         open: true,
@@ -768,11 +720,7 @@ export default function MasterDataPage() {
         total: validRows.length,
       })
       notifyMasterDataChanged()
-      const nextRows = await getDynamicMasterData(activeConfig)
-      setRecordsByCollection((current) => ({
-        ...current,
-        [activeConfig.collectionName]: nextRows,
-      }))
+      await loadActivePage("first")
       restoreScrollPosition(scrollY)
       setImportProgress({
         open: true,
@@ -793,6 +741,21 @@ export default function MasterDataPage() {
     } finally {
       setSaving(false)
       if (importInputRef.current) importInputRef.current.value = ""
+    }
+  }
+
+  async function exportAllCollectionRows(
+    config: MasterCollectionConfig,
+    extension: "csv" | "xlsx"
+  ) {
+    setSaving(true)
+    try {
+      const rows = await getDynamicMasterData(config)
+      exportRows(config, rows, extension)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "エクスポートに失敗しました。")
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -864,33 +827,19 @@ export default function MasterDataPage() {
           <div>
             {configs.map((config) => {
               const rows = recordsByCollection[config.collectionName] ?? []
-              const searchConfig = getSearchConfig(searchByCollection, config.collectionName)
+              const pageMeta = pageMetaByCollection[config.collectionName] ?? {
+                totalCount: 0,
+                firstCursor: null,
+                lastCursor: null,
+                hasPreviousPage: false,
+                hasNextPage: false,
+              }
+              const searchConfig = getSearchConfig(searchByCollection, config)
               const pageSize = pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
-              const visibleRows = rows.filter((row) =>
-                matchesRecordSearch(config, row, searchConfig)
-              )
-              const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize))
+              const totalPages = Math.max(1, Math.ceil(pageMeta.totalCount / pageSize))
               const requestedPage = pageByCollection[config.collectionName] ?? 1
               const currentPage = Math.min(Math.max(requestedPage, 1), totalPages)
               const pageStartIndex = (currentPage - 1) * pageSize
-              const paginatedRows = visibleRows.slice(pageStartIndex, pageStartIndex + pageSize)
-              const pageNumbers = getPageNumbers(currentPage, totalPages)
-              const selectedSearchFields = searchConfig.fields.filter((field) =>
-                config.fields.includes(field)
-              )
-              const selectedSearchLabel =
-                searchConfig.mode === "all"
-                  ? "すべての列"
-                  : selectedSearchFields.length === 1
-                    ? selectedSearchFields[0]
-                    : `${selectedSearchFields.length || config.fields.length} 列`
-              const goToPage = (page: number) => {
-                const nextPage = Math.min(Math.max(page, 1), totalPages)
-                setPageByCollection((current) => ({
-                  ...current,
-                  [config.collectionName]: nextPage,
-                }))
-              }
               if (config.collectionName !== activeCollection) return null
 
               return (
@@ -965,23 +914,23 @@ export default function MasterDataPage() {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => exportRows(config, rows, "csv")}>
-                            すべて CSV
+                            表示中ページ CSV
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => exportRows(config, rows, "xlsx")}>
-                            すべて Excel
+                            表示中ページ Excel
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            disabled={!visibleRows.length}
-                            onClick={() => exportRows(config, visibleRows, "csv")}
+                            disabled={saving}
+                            onClick={() => void exportAllCollectionRows(config, "csv")}
                           >
-                            検索結果 CSV
+                            すべて CSV
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            disabled={!visibleRows.length}
-                            onClick={() => exportRows(config, visibleRows, "xlsx")}
+                            disabled={saving}
+                            onClick={() => void exportAllCollectionRows(config, "xlsx")}
                           >
-                            検索結果 Excel
+                            すべて Excel
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -990,6 +939,33 @@ export default function MasterDataPage() {
 
                   <div className="border-b p-4">
                     <div className="flex flex-wrap items-center gap-2">
+                      <Select
+                        value={searchConfig.field}
+                        onValueChange={(field) => {
+                          setSearchByCollection((current) => ({
+                            ...current,
+                            [config.collectionName]: {
+                              ...getSearchConfig(current, config),
+                              field,
+                            },
+                          }))
+                          setPageByCollection((current) => ({
+                            ...current,
+                            [config.collectionName]: 1,
+                          }))
+                        }}
+                      >
+                        <SelectTrigger className="w-[180px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {config.fields.map((field) => (
+                            <SelectItem key={field} value={field}>
+                              {field}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <div className="relative min-w-[240px] max-w-md flex-1">
                         <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                         <Input
@@ -999,7 +975,7 @@ export default function MasterDataPage() {
                             setSearchByCollection((current) => ({
                               ...current,
                               [config.collectionName]: {
-                                ...getSearchConfig(current, config.collectionName),
+                                ...getSearchConfig(current, config),
                                 query,
                               },
                             }))
@@ -1009,68 +985,9 @@ export default function MasterDataPage() {
                             }))
                           }}
                           className="pl-9"
-                          placeholder="検索..."
+                          placeholder="前方一致で検索..."
                         />
                       </div>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button type="button" variant="outline" className="min-w-[150px] justify-start">
-                            <SlidersHorizontal className="size-4" />
-                            {selectedSearchLabel}
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-64">
-                          <DropdownMenuLabel>検索対象</DropdownMenuLabel>
-                          <DropdownMenuCheckboxItem
-                            checked={searchConfig.mode === "all"}
-                            onCheckedChange={() => {
-                              setSearchByCollection((current) => ({
-                                ...current,
-                                [config.collectionName]: {
-                                  ...getSearchConfig(current, config.collectionName),
-                                  mode: "all",
-                                },
-                              }))
-                              setPageByCollection((current) => ({
-                                ...current,
-                                [config.collectionName]: 1,
-                              }))
-                            }}
-                          >
-                            すべての列
-                          </DropdownMenuCheckboxItem>
-                          <DropdownMenuSeparator />
-                          {config.fields.map((field) => (
-                            <DropdownMenuCheckboxItem
-                              key={field}
-                              checked={
-                                searchConfig.mode === "columns" &&
-                                selectedSearchFields.includes(field)
-                              }
-                              onSelect={(event) => event.preventDefault()}
-                              onCheckedChange={(checked) => {
-                                const nextFields = checked
-                                  ? [...new Set([...selectedSearchFields, field])]
-                                  : selectedSearchFields.filter((item) => item !== field)
-                                setSearchByCollection((current) => ({
-                                  ...current,
-                                  [config.collectionName]: {
-                                    ...getSearchConfig(current, config.collectionName),
-                                    mode: nextFields.length ? "columns" : "all",
-                                    fields: nextFields,
-                                  },
-                                }))
-                                setPageByCollection((current) => ({
-                                  ...current,
-                                  [config.collectionName]: 1,
-                                }))
-                              }}
-                            >
-                              {field}
-                            </DropdownMenuCheckboxItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
                     </div>
                   </div>
 
@@ -1085,8 +1002,17 @@ export default function MasterDataPage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {paginatedRows.length ? (
-                          paginatedRows.map((record) => (
+                        {tableLoading ? (
+                          <TableRow>
+                            <TableCell
+                              colSpan={config.fields.length + 1}
+                              className="h-24 text-center text-muted-foreground"
+                            >
+                              読み込み中...
+                            </TableCell>
+                          </TableRow>
+                        ) : rows.length ? (
+                          rows.map((record) => (
                             <TableRow key={getRecordId(config, record)}>
                               {config.fields.map((field) => (
                                 <TableCell key={field} className="max-w-[260px] truncate">
@@ -1158,11 +1084,11 @@ export default function MasterDataPage() {
                         </Select>
                       </div>
                       <div>
-                        {visibleRows.length
+                        {pageMeta.totalCount
                           ? `${pageStartIndex + 1}-${Math.min(
-                              pageStartIndex + pageSize,
-                              visibleRows.length
-                            )} / ${visibleRows.length} 件`
+                              pageStartIndex + rows.length,
+                              pageMeta.totalCount
+                            )} / ${pageMeta.totalCount} 件`
                           : "0 / 0 件"}
                       </div>
                       <div>
@@ -1174,8 +1100,8 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => goToPage(1)}
-                        disabled={currentPage <= 1}
+                        onClick={() => void loadActivePage("first")}
+                        disabled={tableLoading || currentPage <= 1}
                       >
                         <ChevronsLeft className="size-4" />
                       </Button>
@@ -1183,29 +1109,20 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => goToPage(currentPage - 1)}
-                        disabled={currentPage <= 1}
+                        onClick={() => void loadActivePage("previous", pageMeta.firstCursor)}
+                        disabled={tableLoading || currentPage <= 1}
                       >
                         <ChevronLeft className="size-4" />
                       </Button>
-                      {pageNumbers.map((pageNumber) => (
-                        <Button
-                          key={pageNumber}
-                          type="button"
-                          size="sm"
-                          variant={pageNumber === currentPage ? "default" : "outline"}
-                          className="min-w-9"
-                          onClick={() => goToPage(pageNumber)}
-                        >
-                          {pageNumber}
-                        </Button>
-                      ))}
+                      <Button type="button" size="sm" disabled className="min-w-24">
+                        {currentPage} / {totalPages}
+                      </Button>
                       <Button
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => goToPage(currentPage + 1)}
-                        disabled={currentPage >= totalPages}
+                        onClick={() => void loadActivePage("next", pageMeta.lastCursor)}
+                        disabled={tableLoading || currentPage >= totalPages}
                       >
                         <ChevronRight className="size-4" />
                       </Button>
@@ -1213,8 +1130,8 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => goToPage(totalPages)}
-                        disabled={currentPage >= totalPages}
+                        onClick={() => void loadActivePage("last")}
+                        disabled={tableLoading || currentPage >= totalPages}
                       >
                         <ChevronsRight className="size-4" />
                       </Button>
