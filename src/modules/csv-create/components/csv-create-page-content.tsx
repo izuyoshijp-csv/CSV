@@ -80,6 +80,7 @@ import {
   downloadCsv,
   exportRowsToCsv,
   loadMasterDataStoreForMapping,
+  loadMasterDataStoreForLookupKeys,
   loadMasterDataStoreForRows,
   mergeMasterDataStore,
   readExcelByMapping,
@@ -684,19 +685,11 @@ export function CsvCreatePageContent() {
         refreshSilently(parseMasterDataChangedPayload(event.newValue))
       }
     }
-    const handleFocus = () => refreshSilently()
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") refreshSilently()
-    }
 
     window.addEventListener("storage", handleStorage)
-    window.addEventListener("focus", handleFocus)
-    document.addEventListener("visibilitychange", handleVisibilityChange)
 
     return () => {
       window.removeEventListener("storage", handleStorage)
-      window.removeEventListener("focus", handleFocus)
-      document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [draftRows, hasUnsavedChanges, issues, masterDataStore, selectedMapping, sessionOpen])
 
@@ -775,23 +768,26 @@ export function CsvCreatePageContent() {
       clearCsvMasterDataLookupCache(payload.collectionName, key)
     })
 
-    const changedRowIds = draftRows
-      .filter((row) =>
-        selectedMapping.entries.some((entry) => {
-          if (entry.dataSource !== "masterLookup") return false
-          if (entry.lookupCollection !== payload.collectionName || !entry.lookupCsvColumn) {
-            return false
-          }
-          return lookupKeys.has(normalizeLookupText(row.values[entry.lookupCsvColumn]?.value))
-        })
-      )
-      .map((row) => row.id)
-
-    if (!changedRowIds.length) return
-
-    await refreshLookupForEditedRows(draftRows, changedRowIds, {
-      commitRows: !hasUnsavedChanges,
+    const additionalMasterData = await loadMasterDataStoreForLookupKeys({
+      collection: payload.collectionName,
+      keys: [...lookupKeys],
     })
+    const nextMasterData = mergeMasterDataStore(masterDataStore ?? {}, additionalMasterData)
+    setMasterDataStore(nextMasterData)
+
+    const refreshed = refreshDerivedCsvRows({
+      rows: draftRows,
+      mapping: selectedMapping,
+      masterData: nextMasterData,
+      existingIssues: issues,
+    })
+    const nextIssues = validateCsvRows(refreshed.rows, refreshed.issues)
+    if (!hasUnsavedChanges) {
+      setRows(refreshed.rows)
+      setHasUnsavedChanges(false)
+    }
+    setDraftRows(refreshed.rows)
+    setIssues(nextIssues)
   }
 
   async function rebuildWithManualValues(nextManualValues = manualValues) {

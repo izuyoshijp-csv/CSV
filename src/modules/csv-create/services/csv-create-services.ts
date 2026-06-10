@@ -1052,6 +1052,21 @@ export async function loadMasterDataStoreForRows({
   return masterData
 }
 
+export async function loadMasterDataStoreForLookupKeys({
+  collection,
+  keys,
+}: {
+  collection: string
+  keys: string[]
+}) {
+  const configsByCollection = await getMasterConfigsByCollection()
+  const requestedKeys = [...new Set(keys.map((key) => normalizeText(key)).filter(Boolean))]
+  if (!requestedKeys.length) return {}
+
+  const requests: LookupKeyRequests = new Map([[collection, new Set(requestedKeys)]])
+  return loadRequestedMasterData(requests, configsByCollection, new Set<string>())
+}
+
 export function exportRowsToCsv(
   rows: CsvWorkingRow[],
   mapping: ImportMappingConfig,

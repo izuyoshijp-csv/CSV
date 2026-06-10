@@ -111,7 +111,6 @@ const DEFAULT_BULK_IMPORT_BATCH_SIZE = 400
 const DEFAULT_BULK_IMPORT_BATCH_DELAY_MS = 250
 const DEFAULT_DOCUMENT_ID_LOOKUP_BATCH_SIZE = 20
 const DEFAULT_DOCUMENT_ID_LOOKUP_DELAY_MS = 150
-const DEFAULT_CONTAINS_SEARCH_BATCH_SIZE = 200
 export const MASTERDATA_SEARCH_INDEX_FIELD = "_searchTokensByField"
 const SEARCH_NGRAM_SIZE = 3
 
@@ -278,13 +277,14 @@ async function getDynamicMasterDataContainsPage(
     }
   }
 
-  const batchSize = Math.max(pageSize, DEFAULT_CONTAINS_SEARCH_BATCH_SIZE)
+  const batchSize = pageSize
   const direction = options.direction ?? "first"
   const rows: DynamicMasterDataRecord[] = []
   let firstCursor: DynamicMasterDataPageCursor = null
   let lastCursor: DynamicMasterDataPageCursor = null
   let scanCursor = options.cursor
   let reachedBoundary = false
+  let scannedBatches = 0
 
   while (true) {
     const constraints: QueryConstraint[] = [
@@ -308,6 +308,7 @@ async function getDynamicMasterDataContainsPage(
     }
 
     const snapshot = await getDocs(query(collectionRef, ...constraints))
+    scannedBatches += 1
     const documents = snapshot.docs
 
     if (!documents.length) {
@@ -335,6 +336,7 @@ async function getDynamicMasterDataContainsPage(
     }
 
     if (rows.length >= pageSize) break
+    if (scannedBatches >= 1) break
     if (documents.length < batchSize) {
       reachedBoundary = true
       break
