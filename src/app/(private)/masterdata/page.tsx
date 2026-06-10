@@ -352,10 +352,13 @@ export default function MasterDataPage() {
     try {
       const nextConfigs = await masterCollectionConfigRepository.list()
       setConfigs(nextConfigs)
-      setActiveCollection((current) => current || nextConfigs[0]?.collectionName || "")
+      const nextCollection = nextConfigs[0]?.collectionName || ""
+      setActiveCollection(nextCollection)
+      return nextCollection
     } catch (error) {
       console.error(error)
       toast.error("マスタデータを読み込めませんでした。")
+      return null
     } finally {
       setLoading(false)
     }
@@ -425,12 +428,15 @@ export default function MasterDataPage() {
   )
 
   useEffect(() => {
-    void loadData()
-  }, [loadData])
-
-  useEffect(() => {
-    void loadActivePage("first")
-  }, [loadActivePage])
+    let cancelled = false
+    void loadData().then((nextCollection) => {
+      if (cancelled || !nextCollection) return
+      void loadActivePage("first", undefined)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   function updateSearchDraft(
     config: MasterCollectionConfig,
