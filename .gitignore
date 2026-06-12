@@ -81,6 +81,7 @@ ehthumbs.db
 serviceAccountKey.json
 firebase-adminsdk*.json
 
-# Master Data JSON index (build artifact)
-public/masterdata-index/
+# Master Data JSON index served by the app
+!public/masterdata-index/
+!public/masterdata-index/*.json
 .masterdata-index/
