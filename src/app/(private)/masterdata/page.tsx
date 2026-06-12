@@ -87,6 +87,7 @@ import {
 import {
   applyMasterDataChangeLogToIndex,
   ensureMasterDataCollectionIndex,
+  MASTERDATA_ALL_FIELDS_SEARCH_FIELD,
   searchMasterDataIndexPaged,
 } from "@/modules/masterdata/services/masterdata-json-index-services"
 import type { MasterCollectionConfig, MasterCollectionFieldConfig } from "@/types/firestore-models"
@@ -248,9 +249,33 @@ function getRecordId(config: MasterCollectionConfig, record: DynamicMasterDataRe
 function createSearchCondition(config?: MasterCollectionConfig | null): SearchCondition {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    field: config ? getLookupKeyField(config) : "",
+    field: MASTERDATA_ALL_FIELDS_SEARCH_FIELD,
     operator: "contains",
     value: "",
+  }
+}
+
+function isAllFieldsSearch(field: string) {
+  return field === MASTERDATA_ALL_FIELDS_SEARCH_FIELD
+}
+
+function mergeConfigWithIndexFields(
+  config: MasterCollectionConfig,
+  fields: string[]
+): MasterCollectionConfig {
+  const normalizedFields = [...new Set(fields.map((field) => field.trim()).filter(Boolean))]
+  if (!normalizedFields.length || normalizedFields.join("\u0000") === config.fields.join("\u0000")) {
+    return config
+  }
+
+  return {
+    ...config,
+    fields: normalizedFields,
+    fieldConfigs: normalizedFields.map((name) => ({
+      name,
+      required: config.fieldConfigs?.find((fieldConfig) => fieldConfig.name === name)?.required ?? false,
+      unique: config.fieldConfigs?.find((fieldConfig) => fieldConfig.name === name)?.unique ?? false,
+    })),
   }
 }
 
@@ -270,7 +295,10 @@ function getSearchConfig(
   return {
     conditions: conditions.map((condition) => ({
       ...condition,
-      field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
+      field:
+        isAllFieldsSearch(condition.field) || config.fields.includes(condition.field)
+          ? condition.field
+          : MASTERDATA_ALL_FIELDS_SEARCH_FIELD,
       operator: "contains" as const,
     })),
   }
@@ -279,7 +307,10 @@ function getSearchConfig(
 function getAppliedSearchConditions(config: MasterCollectionConfig, searchConfig: SearchConfig) {
   return searchConfig.conditions
     .map((condition) => ({
-      field: config.fields.includes(condition.field) ? condition.field : getLookupKeyField(config),
+      field:
+        isAllFieldsSearch(condition.field) || config.fields.includes(condition.field)
+          ? condition.field
+          : MASTERDATA_ALL_FIELDS_SEARCH_FIELD,
       operator: "contains" as const,
       value: normalizeText(condition.value),
     }))
@@ -436,8 +467,6 @@ export default function MasterDataPage() {
     }) => {
       setTableLoading(true)
       try {
-        const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, config)
-        const appliedConditions = getAppliedSearchConditions(config, searchConfig)
         const pageSize = pageSizeOverride ?? pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
         const currentPageNum = pageByCollection[config.collectionName] ?? 1
         let pageIndex = 0
@@ -454,6 +483,16 @@ export default function MasterDataPage() {
 
         const indexResult = await ensureMasterDataCollectionIndex(config.collectionName)
         if (indexResult) {
+          const effectiveConfig = mergeConfigWithIndexFields(config, indexResult.index.fields)
+          if (effectiveConfig !== config) {
+            setConfigs((current) =>
+              current.map((item) =>
+                item.collectionName === config.collectionName ? effectiveConfig : item
+              )
+            )
+          }
+          const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, effectiveConfig)
+          const appliedConditions = getAppliedSearchConditions(effectiveConfig, searchConfig)
           const totalResult = searchMasterDataIndexPaged(config.collectionName, {
             conditions: appliedConditions,
             pageIndex: 0,
@@ -488,6 +527,12 @@ export default function MasterDataPage() {
           return
         }
 
+        const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, config)
+        const appliedConditions = getAppliedSearchConditions(config, searchConfig).map((condition) =>
+          isAllFieldsSearch(condition.field)
+            ? { ...condition, field: getLookupKeyField(config) }
+            : condition
+        )
         const page = await getDynamicMasterDataPage(config, {
           pageSize,
           direction,
@@ -1219,6 +1264,9 @@ export default function MasterDataPage() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
+                              <SelectItem value={MASTERDATA_ALL_FIELDS_SEARCH_FIELD}>
+                                すべての項目
+                              </SelectItem>
                               {config.fields.map((field) => (
                                 <SelectItem key={field} value={field}>
                                   {field}

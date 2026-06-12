@@ -54,6 +54,7 @@ const DEFAULT_JSON_BASE_URL = "/masterdata-index"
 const DEFAULT_MANIFEST_NAME = "manifest.json"
 const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 const MANIFEST_MAX_AGE_MS = 5 * 60 * 1000
+export const MASTERDATA_ALL_FIELDS_SEARCH_FIELD = "__all_fields__"
 
 const collectionCaches = new Map<string, CollectionCache>()
 let manifestCache: {
@@ -289,6 +290,19 @@ function getRecordSearchValues(
   lookupKeyField: string
 ): string[] {
   const values: string[] = []
+  if (field === MASTERDATA_ALL_FIELDS_SEARCH_FIELD) {
+    Object.values(record).forEach((value) => {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        values.push(String(value))
+      }
+    })
+    return [...new Set(values)]
+  }
+
   const direct = record[field]
   if (direct !== undefined && direct !== null) values.push(String(direct))
 
@@ -495,6 +509,8 @@ export function getMasterDataCollectionCacheInfo(collectionName: string) {
   if (!cached) return null
   return {
     recordCount: cached.collectionIndex.records.length,
+    fields: cached.collectionIndex.fields,
+    lookupKeyField: cached.collectionIndex.lookupKeyField,
     loadedAt: cached.loadedAt,
     version: cached.collectionIndex.version,
     updatedAt: cached.collectionIndex.updatedAt,
