@@ -245,6 +245,39 @@ function normalizeFieldName(value: unknown) {
   return normalizeSearchText(value).replace(/\s+/g, "")
 }
 
+function getFieldAliasTokens(field: string): string[] {
+  const normalized = normalizeFieldName(field)
+  const aliases = [normalized]
+
+  if (normalized.includes("mav") || normalized.includes("工場資材")) {
+    aliases.push("mav", "工場資材")
+  }
+  if (normalized.includes("mhb")) {
+    aliases.push("mhb")
+  }
+  if (
+    normalized.includes("izuyoshijp") ||
+    normalized.includes("日本") ||
+    normalized.includes("伊豆義")
+  ) {
+    aliases.push("izuyoshijp", "日本", "伊豆義")
+  }
+  if (
+    normalized.includes("izuyoshivn") ||
+    normalized.includes("ベトナム") ||
+    normalized.includes("vietnam")
+  ) {
+    aliases.push("izuyoshivn", "ベトナム", "vietnam")
+  }
+
+  return [...new Set(aliases.filter(Boolean))]
+}
+
+function fieldLooksLikeAlias(recordField: string, aliasTokens: string[]) {
+  const normalizedRecordField = normalizeFieldName(recordField)
+  return aliasTokens.some((token) => normalizedRecordField.includes(token))
+}
+
 function getRecordSearchValues(
   record: DynamicMasterDataRecord,
   field: string,
@@ -255,16 +288,36 @@ function getRecordSearchValues(
   if (direct !== undefined && direct !== null) values.push(String(direct))
 
   const wantedField = normalizeFieldName(field)
+  const lookupField = normalizeFieldName(lookupKeyField)
+  const aliasTokens = getFieldAliasTokens(field)
   Object.entries(record).forEach(([recordField, value]) => {
-    if (normalizeFieldName(recordField) === wantedField && value !== undefined && value !== null) {
+    if (value === undefined || value === null) return
+    const currentField = normalizeFieldName(recordField)
+    if (
+      currentField === wantedField ||
+      (wantedField === lookupField && currentField === lookupField) ||
+      fieldLooksLikeAlias(recordField, aliasTokens)
+    ) {
       values.push(String(value))
     }
   })
 
-  if (normalizeFieldName(field) === normalizeFieldName(lookupKeyField)) {
+  if (wantedField === lookupField || fieldLooksLikeAlias(lookupKeyField, aliasTokens)) {
     values.push(String(record.id ?? ""))
     values.push(String(record.documentId ?? ""))
     values.push(String(record.baseDocumentId ?? ""))
+  }
+
+  if (!values.length) {
+    Object.values(record).forEach((value) => {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        values.push(String(value))
+      }
+    })
   }
 
   return [...new Set(values)]
