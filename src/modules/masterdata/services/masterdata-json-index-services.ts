@@ -65,6 +65,22 @@ function getSafeCollectionFileName(collectionName: string) {
   return collectionName.replace(/[/\\.]/g, "_")
 }
 
+function getCollectionIndexUrls(
+  collectionName: string,
+  baseUrl: string,
+  manifest?: MasterDataIndexManifest
+) {
+  const localUrl = `${baseUrl}/${getSafeCollectionFileName(collectionName)}.json`
+  const manifestUrl = manifest?.collections?.[collectionName]?.url
+  if (!manifestUrl || manifestUrl === localUrl) return [localUrl]
+
+  if (baseUrl === DEFAULT_JSON_BASE_URL || baseUrl.startsWith("/")) {
+    return [localUrl, manifestUrl]
+  }
+
+  return [manifestUrl, localUrl]
+}
+
 function getJsonBaseUrl() {
   if (typeof window !== "undefined") {
     return (window as Window & { __MASTERDATA_INDEX_BASE_URL__?: string }).__MASTERDATA_INDEX_BASE_URL__ ?? DEFAULT_JSON_BASE_URL
@@ -114,17 +130,20 @@ export async function loadMasterDataCollectionIndex(
   manifest?: MasterDataIndexManifest
 ): Promise<MasterDataCollectionIndex | null> {
   const baseUrl = getJsonBaseUrl()
-  const collectionInfo = manifest?.collections?.[collectionName]
-  const url = collectionInfo?.url ?? `${baseUrl}/${getSafeCollectionFileName(collectionName)}.json`
+  const urls = getCollectionIndexUrls(collectionName, baseUrl, manifest)
 
-  try {
-    const response = await fetch(url)
-    if (!response.ok) return null
-    const index = (await response.json()) as MasterDataCollectionIndex
-    return index
-  } catch {
-    return null
+  for (const url of urls) {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) continue
+      const index = (await response.json()) as MasterDataCollectionIndex
+      return index
+    } catch {
+      continue
+    }
   }
+
+  return null
 }
 
 function buildLookupMap(index: MasterDataCollectionIndex): Map<string, DynamicMasterDataRecord> {

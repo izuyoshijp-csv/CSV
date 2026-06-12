@@ -408,9 +408,9 @@ export default function MasterDataPage() {
     try {
       const nextConfigs = await masterCollectionConfigRepository.list()
       setConfigs(nextConfigs)
-      const nextCollection = nextConfigs[0]?.collectionName || ""
-      setActiveCollection(nextCollection)
-      return nextCollection
+      const nextConfig = nextConfigs[0] ?? null
+      setActiveCollection(nextConfig?.collectionName ?? "")
+      return nextConfig
     } catch (error) {
       console.error(error)
       toast.error("マスタデータを読み込めませんでした。")
@@ -420,20 +420,26 @@ export default function MasterDataPage() {
     }
   }, [])
 
-  const loadActivePage = useCallback(
-    async (
-      direction: "first" | "next" | "previous" | "last" = "first",
-      cursor?: DynamicMasterDataPageCursor,
+  const loadCollectionPage = useCallback(
+    async ({
+      config,
+      direction = "first",
+      cursor,
+      searchConfigOverride,
+      pageSizeOverride,
+    }: {
+      config: MasterCollectionConfig
+      direction?: "first" | "next" | "previous" | "last"
+      cursor?: DynamicMasterDataPageCursor
       searchConfigOverride?: SearchConfig
-    ) => {
-      if (!activeConfig) return
-
+      pageSizeOverride?: number
+    }) => {
       setTableLoading(true)
       try {
-        const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, activeConfig)
-        const appliedConditions = getAppliedSearchConditions(activeConfig, searchConfig)
-        const pageSize = pageSizeByCollection[activeConfig.collectionName] ?? DEFAULT_PAGE_SIZE
-        const currentPageNum = pageByCollection[activeConfig.collectionName] ?? 1
+        const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, config)
+        const appliedConditions = getAppliedSearchConditions(config, searchConfig)
+        const pageSize = pageSizeOverride ?? pageSizeByCollection[config.collectionName] ?? DEFAULT_PAGE_SIZE
+        const currentPageNum = pageByCollection[config.collectionName] ?? 1
         let pageIndex = 0
 
         if (direction === "next") {
@@ -444,48 +450,45 @@ export default function MasterDataPage() {
           pageIndex = -1
         }
 
-        const indexResult = await ensureMasterDataCollectionIndex(activeConfig.collectionName)
+        await syncDeltaForCollection(config.collectionName)
+
+        const indexResult = await ensureMasterDataCollectionIndex(config.collectionName)
         if (indexResult) {
-          const allResults = indexResult.index.records.filter((record) =>
-            appliedConditions.every((cond) => {
-              const fieldValue = String(record[cond.field] ?? "").toLowerCase()
-              const searchVal = String(cond.value).toLowerCase().trim()
-              if (!searchVal) return true
-              const op = cond.operator as string
-              if (op === "equals") return fieldValue === searchVal
-              if (op === "prefix") return fieldValue.startsWith(searchVal)
-              return fieldValue.includes(searchVal)
-            })
-          )
-          const totalCount = allResults.length
-          const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
+          const totalResult = searchMasterDataIndexPaged(config.collectionName, {
+            conditions: appliedConditions,
+            pageIndex: 0,
+            pageSize: Number.MAX_SAFE_INTEGER,
+          })
+          const totalPages = Math.max(1, Math.ceil(totalResult.totalCount / pageSize))
           if (direction === "last") pageIndex = totalPages - 1
-          const start = pageIndex * pageSize
-          const pageRows = allResults.slice(start, start + pageSize)
+          const localPage = searchMasterDataIndexPaged(config.collectionName, {
+            conditions: appliedConditions,
+            pageIndex,
+            pageSize,
+          })
 
           setRecordsByCollection((current) => ({
             ...current,
-            [activeConfig.collectionName]: pageRows,
+            [config.collectionName]: localPage.rows,
           }))
           setPageMetaByCollection((current) => ({
             ...current,
-            [activeConfig.collectionName]: {
-              totalCount,
+            [config.collectionName]: {
+              totalCount: localPage.totalCount,
               firstCursor: null,
               lastCursor: null,
-              hasPreviousPage: pageIndex > 0,
-              hasNextPage: start + pageSize < totalCount,
+              hasPreviousPage: localPage.hasPreviousPage,
+              hasNextPage: localPage.hasNextPage,
             },
           }))
           setPageByCollection((current) => ({
             ...current,
-            [activeConfig.collectionName]: pageIndex + 1,
+            [config.collectionName]: pageIndex + 1,
           }))
-          setTableLoading(false)
           return
         }
 
-        const page = await getDynamicMasterDataPage(activeConfig, {
+        const page = await getDynamicMasterDataPage(config, {
           pageSize,
           direction,
           cursor,
@@ -496,11 +499,11 @@ export default function MasterDataPage() {
 
         setRecordsByCollection((current) => ({
           ...current,
-          [activeConfig.collectionName]: page.rows,
+          [config.collectionName]: page.rows,
         }))
         setPageMetaByCollection((current) => ({
           ...current,
-          [activeConfig.collectionName]: {
+          [config.collectionName]: {
             totalCount: page.totalCount,
             firstCursor: page.firstCursor,
             lastCursor: page.lastCursor,
@@ -509,7 +512,7 @@ export default function MasterDataPage() {
           },
         }))
         setPageByCollection((current) => {
-          const currentPage = current[activeConfig.collectionName] ?? 1
+          const currentPage = current[config.collectionName] ?? 1
           const nextPage =
             direction === "next"
               ? totalPages === null
@@ -523,7 +526,7 @@ export default function MasterDataPage() {
 
           return {
             ...current,
-            [activeConfig.collectionName]: nextPage,
+            [config.collectionName]: nextPage,
           }
         })
       } catch (error) {
@@ -533,7 +536,24 @@ export default function MasterDataPage() {
         setTableLoading(false)
       }
     },
-    [activeConfig, pageSizeByCollection, searchByCollection]
+    [pageByCollection, pageSizeByCollection, searchByCollection]
+  )
+
+  const loadActivePage = useCallback(
+    async (
+      direction: "first" | "next" | "previous" | "last" = "first",
+      cursor?: DynamicMasterDataPageCursor,
+      searchConfigOverride?: SearchConfig
+    ) => {
+      if (!activeConfig) return
+      await loadCollectionPage({
+        config: activeConfig,
+        direction,
+        cursor,
+        searchConfigOverride,
+      })
+    },
+    [activeConfig, loadCollectionPage]
   )
 
   useEffect(() => {
@@ -546,9 +566,9 @@ export default function MasterDataPage() {
       ]
       await Promise.allSettled(defaultCollections.map((c) => syncDeltaForCollection(c)))
       if (cancelled) return
-      const nextCollection = await loadData()
-      if (cancelled || !nextCollection) return
-      void loadActivePage("first", undefined)
+      const nextConfig = await loadData()
+      if (cancelled || !nextConfig) return
+      void loadCollectionPage({ config: nextConfig, direction: "first" })
     })()
     return () => {
       cancelled = true
@@ -575,7 +595,11 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
-    void loadActivePage("first", undefined, draft)
+    void loadCollectionPage({
+      config,
+      direction: "first",
+      searchConfigOverride: draft,
+    })
   }
 
   function clearSearchDraft(config: MasterCollectionConfig) {
@@ -592,7 +616,11 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
-    void loadActivePage("first", undefined, emptySearch)
+    void loadCollectionPage({
+      config,
+      direction: "first",
+      searchConfigOverride: emptySearch,
+    })
   }
 
   function openNewConfigDialog() {
@@ -1010,7 +1038,10 @@ export default function MasterDataPage() {
                 <button
                   key={config.collectionName}
                   type="button"
-                  onClick={() => setActiveCollection(config.collectionName)}
+                  onClick={() => {
+                    setActiveCollection(config.collectionName)
+                    void loadCollectionPage({ config, direction: "first" })
+                  }}
                   className={`rounded-md px-3 py-2 text-left text-sm transition-colors ${
                     activeCollection === config.collectionName
                       ? "bg-accent font-medium text-accent-foreground"
@@ -1350,14 +1381,20 @@ export default function MasterDataPage() {
                         <Select
                           value={String(pageSize)}
                           onValueChange={(value) => {
+                            const nextPageSize = Number(value)
                             setPageSizeByCollection((current) => ({
                               ...current,
-                              [config.collectionName]: Number(value),
+                              [config.collectionName]: nextPageSize,
                             }))
                             setPageByCollection((current) => ({
                               ...current,
                               [config.collectionName]: 1,
                             }))
+                            void loadCollectionPage({
+                              config,
+                              direction: "first",
+                              pageSizeOverride: nextPageSize,
+                            })
                           }}
                         >
                           <SelectTrigger size="sm" className="w-[86px]">
@@ -1395,7 +1432,7 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => void loadActivePage("first")}
+                        onClick={() => void loadCollectionPage({ config, direction: "first" })}
                         disabled={tableLoading || currentPage <= 1}
                       >
                         <ChevronsLeft className="size-4" />
@@ -1404,7 +1441,13 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => void loadActivePage("previous", pageMeta.firstCursor)}
+                        onClick={() =>
+                          void loadCollectionPage({
+                            config,
+                            direction: "previous",
+                            cursor: pageMeta.firstCursor,
+                          })
+                        }
                         disabled={tableLoading || currentPage <= 1}
                       >
                         <ChevronLeft className="size-4" />
@@ -1416,7 +1459,13 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => void loadActivePage("next", pageMeta.lastCursor)}
+                        onClick={() =>
+                          void loadCollectionPage({
+                            config,
+                            direction: "next",
+                            cursor: pageMeta.lastCursor,
+                          })
+                        }
                         disabled={
                           tableLoading ||
                           (totalPages === null
@@ -1430,7 +1479,7 @@ export default function MasterDataPage() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() => void loadActivePage("last")}
+                        onClick={() => void loadCollectionPage({ config, direction: "last" })}
                         disabled={
                           tableLoading ||
                           totalPages === null ||
