@@ -65,12 +65,36 @@ function getSafeCollectionFileName(collectionName: string) {
   return collectionName.replace(/[/\\.]/g, "_")
 }
 
+function joinIndexFileUrl(baseUrl: string, fileName: string) {
+  const normalizedBase = baseUrl.replace(/\/+$/, "")
+  if (!normalizedBase) return `/${fileName}`
+
+  try {
+    const url = new URL(normalizedBase)
+    const objectPathMarker = "/o/"
+    const markerIndex = url.pathname.indexOf(objectPathMarker)
+    if (url.hostname.includes("firebasestorage.googleapis.com") && markerIndex >= 0) {
+      const prefixPath = url.pathname.slice(0, markerIndex + objectPathMarker.length)
+      const rawObjectPrefix = url.pathname.slice(markerIndex + objectPathMarker.length)
+      const objectPrefix = decodeURIComponent(rawObjectPrefix).replace(/\/+$/, "")
+      const objectName = objectPrefix ? `${objectPrefix}/${fileName}` : fileName
+      url.pathname = `${prefixPath}${encodeURIComponent(objectName)}`
+      url.searchParams.set("alt", "media")
+      return url.toString()
+    }
+  } catch {
+    // Relative URL; use the normal path join below.
+  }
+
+  return `${normalizedBase}/${fileName}`
+}
+
 function getCollectionIndexUrls(
   collectionName: string,
   baseUrl: string,
   manifest?: MasterDataIndexManifest
 ) {
-  const localUrl = `${baseUrl}/${getSafeCollectionFileName(collectionName)}.json`
+  const localUrl = joinIndexFileUrl(baseUrl, `${getSafeCollectionFileName(collectionName)}.json`)
   const manifestUrl = manifest?.collections?.[collectionName]?.url
   if (!manifestUrl || manifestUrl === localUrl) return [localUrl]
 
@@ -106,7 +130,7 @@ export async function loadMasterDataIndexManifest(): Promise<MasterDataIndexStat
 
   try {
     const baseUrl = getJsonBaseUrl()
-    const url = `${baseUrl}/${DEFAULT_MANIFEST_NAME}`
+    const url = joinIndexFileUrl(baseUrl, DEFAULT_MANIFEST_NAME)
     const response = await fetch(url)
     if (!response.ok) {
       const status: MasterDataIndexStatus = { available: false, reason: "manifest_not_found" }
@@ -213,22 +237,56 @@ export function getMasterDataIndexStatus(collectionName: string): boolean {
   return Date.now() - cached.loadedAt < ttl
 }
 
+function normalizeSearchText(value: unknown) {
+  return String(value ?? "").normalize("NFKC").toLowerCase().trim()
+}
+
+function normalizeFieldName(value: unknown) {
+  return normalizeSearchText(value).replace(/\s+/g, "")
+}
+
+function getRecordSearchValues(
+  record: DynamicMasterDataRecord,
+  field: string,
+  lookupKeyField: string
+): string[] {
+  const values: string[] = []
+  const direct = record[field]
+  if (direct !== undefined && direct !== null) values.push(String(direct))
+
+  const wantedField = normalizeFieldName(field)
+  Object.entries(record).forEach(([recordField, value]) => {
+    if (normalizeFieldName(recordField) === wantedField && value !== undefined && value !== null) {
+      values.push(String(value))
+    }
+  })
+
+  if (normalizeFieldName(field) === normalizeFieldName(lookupKeyField)) {
+    values.push(String(record.id ?? ""))
+    values.push(String(record.documentId ?? ""))
+    values.push(String(record.baseDocumentId ?? ""))
+  }
+
+  return [...new Set(values)]
+}
+
 function matchesSearch(
   record: DynamicMasterDataRecord,
-  conditions: DynamicMasterDataSearchCondition[]
+  conditions: DynamicMasterDataSearchCondition[],
+  lookupKeyField: string
 ): boolean {
   return conditions.every((condition) => {
-    const fieldValue = String(record[condition.field] ?? "").toLowerCase()
-    const searchValue = String(condition.value).toLowerCase().trim()
+    const fieldValues = getRecordSearchValues(record, condition.field, lookupKeyField)
+    const searchValue = normalizeSearchText(condition.value)
     if (!searchValue) return true
 
     if (condition.operator === "equals") {
-      return fieldValue === searchValue
+      return fieldValues.some((value) => normalizeSearchText(value) === searchValue)
     }
     if (condition.operator === "prefix") {
-      return fieldValue.startsWith(searchValue)
+      return fieldValues.some((value) => normalizeSearchText(value).startsWith(searchValue))
     }
-    return fieldValue.includes(searchValue)
+    return fieldValues.some((value) => normalizeSearchText(value).includes(searchValue))
   })
 }
 
@@ -262,7 +320,7 @@ export function searchMasterDataIndexPaged(
   }
 
   const allRows = cached.collectionIndex.records.filter((record) =>
-    matchesSearch(record, options.conditions)
+    matchesSearch(record, options.conditions, cached.collectionIndex.lookupKeyField)
   )
 
   const start = options.pageIndex * options.pageSize
@@ -288,7 +346,7 @@ export function searchMasterDataIndex(
   }
 
   const rows = cached.collectionIndex.records.filter((record) =>
-    matchesSearch(record, conditions)
+    matchesSearch(record, conditions, cached.collectionIndex.lookupKeyField)
   )
 
   return {
