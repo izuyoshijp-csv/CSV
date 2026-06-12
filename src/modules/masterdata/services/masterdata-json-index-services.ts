@@ -247,6 +247,49 @@ function normalizeSearchText(value: unknown) {
   return String(value ?? "").normalize("NFKC").toLowerCase().trim()
 }
 
+function compactSearchText(value: unknown) {
+  return normalizeSearchText(value).replace(/[\s\-_.\\/]+/g, "")
+}
+
+function getPrimitiveRecordValues(record: DynamicMasterDataRecord): string[] {
+  const values: string[] = []
+  Object.values(record).forEach((value) => {
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      values.push(String(value))
+    }
+  })
+  return [...new Set(values)]
+}
+
+function searchValueMatches(value: unknown, searchValue: string, operator: DynamicMasterDataSearchCondition["operator"]) {
+  const normalizedValue = normalizeSearchText(value)
+  const compactValue = compactSearchText(value)
+  const normalizedSearch = normalizeSearchText(searchValue)
+  const compactSearch = compactSearchText(searchValue)
+  const valueCandidates = [...new Set([normalizedValue, compactValue].filter(Boolean))]
+  const searchCandidates = [...new Set([normalizedSearch, compactSearch].filter(Boolean))]
+
+  if (!searchCandidates.length) return true
+
+  if (operator === "equals") {
+    return valueCandidates.some((candidate) =>
+      searchCandidates.some((search) => candidate === search)
+    )
+  }
+  if (operator === "prefix") {
+    return valueCandidates.some((candidate) =>
+      searchCandidates.some((search) => candidate.startsWith(search))
+    )
+  }
+  return valueCandidates.some((candidate) =>
+    searchCandidates.some((search) => candidate.includes(search))
+  )
+}
+
 function normalizeFieldName(value: unknown) {
   return normalizeSearchText(value).replace(/\s+/g, "")
 }
@@ -291,16 +334,7 @@ function getRecordSearchValues(
 ): string[] {
   const values: string[] = []
   if (field === MASTERDATA_ALL_FIELDS_SEARCH_FIELD) {
-    Object.values(record).forEach((value) => {
-      if (
-        typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean"
-      ) {
-        values.push(String(value))
-      }
-    })
-    return [...new Set(values)]
+    return getPrimitiveRecordValues(record)
   }
 
   const direct = record[field]
@@ -328,15 +362,7 @@ function getRecordSearchValues(
   }
 
   if (!values.length) {
-    Object.values(record).forEach((value) => {
-      if (
-        typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean"
-      ) {
-        values.push(String(value))
-      }
-    })
+    values.push(...getPrimitiveRecordValues(record))
   }
 
   return [...new Set(values)]
@@ -349,16 +375,14 @@ function matchesSearch(
 ): boolean {
   return conditions.every((condition) => {
     const fieldValues = getRecordSearchValues(record, condition.field, lookupKeyField)
+    const searchValues =
+      condition.field === MASTERDATA_ALL_FIELDS_SEARCH_FIELD
+        ? fieldValues
+        : [...new Set([...fieldValues, ...getPrimitiveRecordValues(record)])]
     const searchValue = normalizeSearchText(condition.value)
     if (!searchValue) return true
 
-    if (condition.operator === "equals") {
-      return fieldValues.some((value) => normalizeSearchText(value) === searchValue)
-    }
-    if (condition.operator === "prefix") {
-      return fieldValues.some((value) => normalizeSearchText(value).startsWith(searchValue))
-    }
-    return fieldValues.some((value) => normalizeSearchText(value).includes(searchValue))
+    return searchValues.some((value) => searchValueMatches(value, searchValue, condition.operator))
   })
 }
 

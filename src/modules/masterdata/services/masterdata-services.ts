@@ -158,6 +158,29 @@ function normalizeSearchIndexText(value: unknown) {
   return String(value ?? "").trim().toLowerCase()
 }
 
+function normalizeContainsText(value: unknown) {
+  return String(value ?? "").normalize("NFKC").trim().toLowerCase()
+}
+
+function compactContainsText(value: unknown) {
+  return normalizeContainsText(value).replace(/[\s\-_.\\/]+/g, "")
+}
+
+function containsTextMatches(value: unknown, searchValue: unknown) {
+  const normalizedValue = normalizeContainsText(value)
+  const compactValue = compactContainsText(value)
+  const normalizedSearch = normalizeContainsText(searchValue)
+  const compactSearch = compactContainsText(searchValue)
+  const valueCandidates = [...new Set([normalizedValue, compactValue].filter(Boolean))]
+  const searchCandidates = [...new Set([normalizedSearch, compactSearch].filter(Boolean))]
+
+  if (!searchCandidates.length) return true
+
+  return valueCandidates.some((candidate) =>
+    searchCandidates.some((search) => candidate.includes(search))
+  )
+}
+
 export function buildMasterDataSearchTokens(value: unknown) {
   const text = normalizeSearchIndexText(value)
   if (!text) return []
@@ -233,7 +256,7 @@ function getContainsSearchConditions(
   return (search.conditions ?? [])
     .map((condition) => ({
       ...condition,
-      value: String(condition.value ?? "").trim().toLowerCase(),
+      value: String(condition.value ?? "").trim(),
     }))
     .filter((condition) => {
       return (
@@ -249,10 +272,101 @@ function matchesContainsSearch(
   conditions: DynamicMasterDataSearchCondition[]
 ) {
   return conditions.every((condition) => {
-    return String(record[condition.field] ?? "")
-      .toLowerCase()
-      .includes(String(condition.value ?? "").toLowerCase())
+    return containsTextMatches(record[condition.field], condition.value)
   })
+}
+
+async function getDynamicMasterDataPrefixContainsPage(
+  config: MasterCollectionConfig,
+  options: DynamicMasterDataPageOptions,
+  containsConditions: DynamicMasterDataSearchCondition[]
+): Promise<DynamicMasterDataPage> {
+  const db = getFirestoreSafe()
+  if (!db) {
+    throw new Error(
+      "Firebase is not configured. Please set NEXT_PUBLIC_FIREBASE_* environment variables."
+    )
+  }
+
+  const pageSize = Math.max(1, options.pageSize)
+  const collectionRef = collection(db, config.collectionName)
+  const prefixCondition = containsConditions[0]
+  const rawPrefix = String(prefixCondition.value ?? "").trim()
+  const direction = options.direction ?? "first"
+  const rows: DynamicMasterDataRecord[] = []
+  let firstCursor: DynamicMasterDataPageCursor = null
+  let lastCursor: DynamicMasterDataPageCursor = null
+  let scanCursor = options.cursor
+  let reachedBoundary = false
+  let scannedBatches = 0
+  const batchSize = Math.max(pageSize, 50)
+
+  while (rows.length < pageSize) {
+    const constraints: QueryConstraint[] = [
+      orderBy(prefixCondition.field),
+      startAt(rawPrefix),
+      endAt(`${rawPrefix}\uf8ff`),
+    ]
+
+    if ((direction === "next" || direction === "first") && scanCursor) {
+      constraints.push(startAfter(scanCursor))
+    }
+
+    if (direction === "previous") {
+      if (scanCursor) constraints.push(endBefore(scanCursor))
+      constraints.push(limitToLast(batchSize))
+    } else {
+      constraints.push(limit(batchSize))
+    }
+
+    const snapshot = await getDocs(query(collectionRef, ...constraints))
+    scannedBatches += 1
+    const documents = snapshot.docs
+
+    if (!documents.length) {
+      reachedBoundary = true
+      break
+    }
+
+    if (direction === "previous") {
+      firstCursor = documents[0]
+      lastCursor = lastCursor ?? documents[documents.length - 1]
+    } else {
+      firstCursor = firstCursor ?? documents[0]
+      lastCursor = documents[documents.length - 1]
+    }
+
+    const matchedRows = documents
+      .map(mapDynamicMasterDataSnapshot)
+      .filter((record) => matchesContainsSearch(record, containsConditions))
+
+    if (direction === "previous") {
+      rows.unshift(...matchedRows)
+      scanCursor = documents[0]
+    } else {
+      rows.push(...matchedRows)
+      scanCursor = documents[documents.length - 1]
+    }
+
+    if (documents.length < batchSize) {
+      reachedBoundary = true
+      break
+    }
+    if (scannedBatches >= 5) break
+  }
+
+  const pageRows = direction === "previous" ? rows.slice(-pageSize) : rows.slice(0, pageSize)
+
+  return {
+    rows: pageRows,
+    totalCount: null,
+    firstCursor,
+    lastCursor,
+    hasPreviousPage: direction !== "first" && Boolean(options.cursor) && !reachedBoundary,
+    hasNextPage:
+      direction === "previous" ||
+      (!reachedBoundary && Boolean(lastCursor) && rows.length >= pageSize),
+  }
 }
 
 async function getDynamicMasterDataContainsPage(
@@ -271,6 +385,9 @@ async function getDynamicMasterDataContainsPage(
   const collectionRef = collection(db, config.collectionName)
   const indexCondition = containsConditions[0]
   const indexToken = buildMasterDataSearchTokens(indexCondition.value)[0]
+  if (String(indexCondition.value ?? "").trim().length < SEARCH_NGRAM_SIZE) {
+    return getDynamicMasterDataPrefixContainsPage(config, options, containsConditions)
+  }
   if (!indexToken) {
     return {
       rows: [],
