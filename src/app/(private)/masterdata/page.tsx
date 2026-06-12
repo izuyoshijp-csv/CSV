@@ -423,13 +423,14 @@ export default function MasterDataPage() {
   const loadActivePage = useCallback(
     async (
       direction: "first" | "next" | "previous" | "last" = "first",
-      cursor?: DynamicMasterDataPageCursor
+      cursor?: DynamicMasterDataPageCursor,
+      searchConfigOverride?: SearchConfig
     ) => {
       if (!activeConfig) return
 
       setTableLoading(true)
       try {
-        const searchConfig = getSearchConfig(searchByCollection, activeConfig)
+        const searchConfig = searchConfigOverride ?? getSearchConfig(searchByCollection, activeConfig)
         const appliedConditions = getAppliedSearchConditions(activeConfig, searchConfig)
         const pageSize = pageSizeByCollection[activeConfig.collectionName] ?? DEFAULT_PAGE_SIZE
         const currentPageNum = pageByCollection[activeConfig.collectionName] ?? 1
@@ -574,7 +575,7 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
-    void loadActivePage("first")
+    void loadActivePage("first", undefined, draft)
   }
 
   function clearSearchDraft(config: MasterCollectionConfig) {
@@ -591,7 +592,7 @@ export default function MasterDataPage() {
       ...current,
       [config.collectionName]: 1,
     }))
-    void loadActivePage("first")
+    void loadActivePage("first", undefined, emptySearch)
   }
 
   function openNewConfigDialog() {
