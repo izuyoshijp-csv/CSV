@@ -29,6 +29,11 @@ import {
   type QueryDocumentSnapshot,
 } from "firebase/firestore"
 import type { MasterCollectionConfig } from "@/types/firestore-models"
+import { createMasterDataChangeLog } from "./masterdata-change-log-services"
+import {
+  patchMasterDataIndexRecord,
+  removeMasterDataIndexRecord,
+} from "./masterdata-json-index-services"
 
 export type CusCodeListItem = {
   id?: string
@@ -603,16 +608,27 @@ export async function createDynamicMasterDataRecord(
   const documentId = options.documentId
     ? makeSafeDocumentId(options.documentId)
     : await getNextDynamicMasterDocumentId(config, baseDocumentId)
-  return service.create(
-    withMasterDataSearchIndex(config, {
-      ...record,
-      [lookupKeyField]: lookupKey,
-      id: documentId,
-      documentId,
-      baseDocumentId,
-    }),
-    documentId
-  )
+
+  const indexedRecord = withMasterDataSearchIndex(config, {
+    ...record,
+    [lookupKeyField]: lookupKey,
+    id: documentId,
+    documentId,
+    baseDocumentId,
+  })
+  await service.create(indexedRecord, documentId)
+
+  await createMasterDataChangeLog({
+    collectionName: config.collectionName,
+    documentId,
+    baseDocumentId,
+    lookupKey,
+    operation: "create",
+    record: indexedRecord,
+  })
+  patchMasterDataIndexRecord(config.collectionName, indexedRecord, lookupKeyField)
+
+  return indexedRecord
 }
 
 export async function createDynamicMasterDataRecords(
@@ -647,6 +663,7 @@ export async function createDynamicMasterDataRecords(
   for (let index = 0; index < records.length; index += batchSize) {
     const batch = writeBatch(db)
     const chunk = records.slice(index, index + batchSize)
+    const indexedChunk: DynamicMasterDataRecord[] = []
 
     chunk.forEach((record, chunkIndex) => {
       const recordIndex = index + chunkIndex
@@ -660,23 +677,33 @@ export async function createDynamicMasterDataRecords(
       const documentRef = doc(db, config.collectionName, documentId)
       const { id: _id, ...recordData } = record
 
-      batch.set(
-        documentRef,
-        withMasterDataSearchIndex(config, {
-          ...recordData,
-          [lookupKeyField]: lookupKey,
-          documentId,
-          baseDocumentId,
-          createdAt: record.createdAt ?? serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }),
-        { merge: true }
-      )
+      const indexedRecord = withMasterDataSearchIndex(config, {
+        ...recordData,
+        [lookupKeyField]: lookupKey,
+        documentId,
+        baseDocumentId,
+        createdAt: record.createdAt ?? serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      indexedChunk.push(indexedRecord)
+      batch.set(documentRef, indexedRecord, { merge: true })
     })
 
     await batch.commit()
     imported += chunk.length
     options.onProgress?.({ imported, total: records.length })
+
+    for (const indexedRecord of indexedChunk) {
+      patchMasterDataIndexRecord(config.collectionName, indexedRecord, lookupKeyField)
+    }
+
+    await createMasterDataChangeLog({
+      collectionName: config.collectionName,
+      documentId: `bulk-import-${index}-${batchSize}`,
+      baseDocumentId: "bulk",
+      lookupKey: `bulk:${index}:${indexedChunk.length}`,
+      operation: "update",
+    })
 
     if (delayMs > 0 && imported < records.length) {
       await sleep(delayMs)
@@ -707,12 +734,25 @@ export async function updateDynamicMasterDataRecord(
     throw new Error("Lookup key cannot be changed. Create a new record instead.")
   }
 
-  return service.update(id, withMasterDataSearchIndex(config, {
+  const indexedRecord = withMasterDataSearchIndex(config, {
     ...record,
     [lookupKeyField]: currentKey,
     documentId: id,
     baseDocumentId,
-  }))
+  })
+  await service.update(id, indexedRecord)
+
+  await createMasterDataChangeLog({
+    collectionName: config.collectionName,
+    documentId: id,
+    baseDocumentId,
+    lookupKey: currentKey,
+    operation: "update",
+    record: indexedRecord,
+  })
+  patchMasterDataIndexRecord(config.collectionName, indexedRecord, lookupKeyField)
+
+  return indexedRecord
 }
 
 export async function deleteDynamicMasterDataRecord(
@@ -720,7 +760,22 @@ export async function deleteDynamicMasterDataRecord(
   id: string
 ) {
   const service = createFirestoreCrudService<DynamicMasterDataRecord>(config.collectionName)
-  return service.delete(id)
+  const existing = await service.get(id)
+  const lookupKeyField = getLookupKeyField(config)
+  const lookupKey = String(existing?.[lookupKeyField] ?? existing?.baseDocumentId ?? existing?.documentId ?? existing?.id ?? "")
+  const baseDocumentId = String(existing?.baseDocumentId ?? lookupKey)
+
+  await service.delete(id)
+
+  await createMasterDataChangeLog({
+    collectionName: config.collectionName,
+    documentId: id,
+    baseDocumentId,
+    lookupKey,
+    operation: "delete",
+  })
+  removeMasterDataIndexRecord(config.collectionName, id)
+  if (lookupKey) removeMasterDataIndexRecord(config.collectionName, lookupKey)
 }
 
 export async function deleteAllDynamicMasterDataRecords(config: MasterCollectionConfig) {

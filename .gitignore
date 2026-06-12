@@ -80,3 +80,7 @@ ehthumbs.db
 .env.local
 serviceAccountKey.json
 firebase-adminsdk*.json
+
+# Master Data JSON index (build artifact)
+public/masterdata-index/
+.masterdata-index/

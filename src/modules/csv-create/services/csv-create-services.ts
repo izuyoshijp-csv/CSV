@@ -9,6 +9,7 @@ import {
   createUnitCodeList,
   createUnitPriceList,
   getDynamicMasterDataByKeys,
+  getLookupKeyField,
   type CusCodeListItem,
   type ItemCodeListItem,
   type PICWHCodeListItem,
@@ -18,6 +19,14 @@ import {
 import {
   masterCollectionConfigRepository,
 } from "@/modules/masterdata/services/master-collection-config-services"
+import {
+  ensureMasterDataCollectionIndex,
+  getMasterDataRecordsFromIndex,
+  applyMasterDataChangeLogToIndex,
+  clearMasterDataJsonIndexCache,
+  type MasterDataCollectionIndex,
+} from "@/modules/masterdata/services/masterdata-json-index-services"
+import { listMasterDataChangeLogs } from "@/modules/masterdata/services/masterdata-change-log-services"
 import type {
   CsvColumnLetter,
   ImportMappingConfig,
@@ -913,8 +922,32 @@ async function loadRequestedMasterData(
     [...requests.entries()].map(async ([collection, values]) => {
       const keys = [...values]
       keys.forEach((key) => attemptedKeys.add(getLookupRequestKey(collection, key)))
-      const cachedRecords: Array<Record<string, unknown>> = []
-      const missingKeys = keys.filter((key) => {
+
+      const config = configsByCollection.get(collection) ?? {
+        id: collection,
+        collectionName: collection,
+        displayName: collection,
+        fields: [],
+      }
+
+      // Step 1: Check JSON index first
+      const fromIndex = new Map<string, Record<string, unknown>>()
+      const missingFromIndex: string[] = []
+
+      const indexResult = await ensureMasterDataCollectionIndex(collection)
+      if (indexResult) {
+        const indexed = getMasterDataRecordsFromIndex(collection, keys)
+        indexed.forEach((record, key) => fromIndex.set(key, record))
+        keys.forEach((key) => {
+          if (!fromIndex.has(key)) missingFromIndex.push(key)
+        })
+      } else {
+        missingFromIndex.push(...keys)
+      }
+
+      // Step 2: Check TTL cache for missing keys
+      const cachedRecords: Array<Record<string, unknown>> = [...fromIndex.values()]
+      const missingKeys = missingFromIndex.filter((key) => {
         const cacheKey = getLookupRequestKey(collection, key)
         const cached = masterLookupRecordCache.get(cacheKey)
         const cacheValid = cached && Date.now() - cached.cachedAt < MASTER_LOOKUP_CACHE_TTL_MS
@@ -925,18 +958,16 @@ async function loadRequestedMasterData(
         if (cached.record) cachedRecords.push(cached.record)
         return false
       })
-      if (!missingKeys.length) return [collection, cachedRecords] as const
 
-      const config = configsByCollection.get(collection) ?? {
-        id: collection,
-        collectionName: collection,
-        displayName: collection,
-        fields: [],
+      // Step 3: Fallback Firestore for keys not in JSON index or cache
+      if (!missingKeys.length) {
+        return [collection, cachedRecords] as const
       }
+
+      const lookupKeyField = getLookupKeyField(config)
       const records = await getDynamicMasterDataByKeys(config, missingKeys)
       const recordsByLookupKey = new Map<string, Record<string, unknown>>()
       records.forEach((record) => {
-        const lookupKeyField = config.fields[0] ?? ""
         const lookupKey = normalizeText(
           lookupKeyField ? record[lookupKeyField] : record.baseDocumentId ?? record.documentId ?? record.id
         )
@@ -979,6 +1010,65 @@ async function getMasterConfigsByCollection() {
   return configsByCollection
 }
 
+const MASTER_DATA_DELTA_SYNC_STORAGE_KEY = "masterdata:delta-sync-at"
+
+export function getLastDeltaSyncTime(collectionName: string): Date | null {
+  try {
+    const stored = window.localStorage.getItem(`${MASTER_DATA_DELTA_SYNC_STORAGE_KEY}:${collectionName}`)
+    if (!stored) return null
+    const ts = parseInt(stored, 10)
+    return Number.isFinite(ts) && ts > 0 ? new Date(ts) : null
+  } catch {
+    return null
+  }
+}
+
+function setLastDeltaSyncTime(collectionName: string, syncedAt: Date = new Date()) {
+  try {
+    window.localStorage.setItem(
+      `${MASTER_DATA_DELTA_SYNC_STORAGE_KEY}:${collectionName}`,
+      String(syncedAt.getTime())
+    )
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+async function syncDeltasForCollections(collections: string[]) {
+  for (const collectionName of collections) {
+    const result = await ensureMasterDataCollectionIndex(collectionName)
+    if (!result) continue
+
+    const snapshotUpdatedAt = new Date(result.index.updatedAt)
+    const since = getLastDeltaSyncTime(collectionName) ?? (
+      Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
+    )
+    const syncStartedAt = new Date()
+    const changes = await listMasterDataChangeLogs(collectionName, since)
+
+    const lookupKeyField = result.index.lookupKeyField
+
+    for (const change of changes) {
+      applyMasterDataChangeLogToIndex(collectionName, change, lookupKeyField)
+    }
+    const latestChangeAt = changes.reduce<Date | null>((latest, change) => {
+      if (!change.changedAt) return latest
+      return !latest || change.changedAt > latest ? change.changedAt : latest
+    }, null)
+    setLastDeltaSyncTime(collectionName, latestChangeAt ?? syncStartedAt)
+  }
+}
+
+function collectCollectionNamesFromMapping(mapping: ImportMappingConfig): string[] {
+  const collections = new Set<string>()
+  for (const entry of mapping.entries) {
+    if (entry.dataSource === "masterLookup" && entry.lookupCollection) {
+      collections.add(entry.lookupCollection)
+    }
+  }
+  return [...collections]
+}
+
 export async function loadMasterDataStoreForMapping({
   mapping,
   excel,
@@ -989,6 +1079,8 @@ export async function loadMasterDataStoreForMapping({
   manualInputs?: Record<string, string>
 }) {
   const configsByCollection = await getMasterConfigsByCollection()
+  const mappingCollections = collectCollectionNamesFromMapping(mapping)
+  await syncDeltasForCollections(mappingCollections)
   const attemptedKeys = new Set<string>()
   let masterData: MasterDataLookupStore = {}
   const maxIterations =
@@ -1022,6 +1114,8 @@ export async function loadMasterDataStoreForRows({
   mapping: ImportMappingConfig
 }) {
   const configsByCollection = await getMasterConfigsByCollection()
+  const mappingCollections = collectCollectionNamesFromMapping(mapping)
+  await syncDeltasForCollections(mappingCollections)
   const attemptedKeys = new Set<string>()
   let masterData: MasterDataLookupStore = {}
   const maxIterations =
@@ -1060,6 +1154,7 @@ export async function loadMasterDataStoreForLookupKeys({
   keys: string[]
 }) {
   const configsByCollection = await getMasterConfigsByCollection()
+  await syncDeltasForCollections([collection])
   const requestedKeys = [...new Set(keys.map((key) => normalizeText(key)).filter(Boolean))]
   if (!requestedKeys.length) return {}
 

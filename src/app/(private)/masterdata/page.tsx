@@ -81,9 +81,18 @@ import {
   masterCollectionConfigRepository,
   normalizeMasterCollectionConfig,
 } from "@/modules/masterdata/services/master-collection-config-services"
+import {
+  listMasterDataChangeLogs,
+} from "@/modules/masterdata/services/masterdata-change-log-services"
+import {
+  applyMasterDataChangeLogToIndex,
+  ensureMasterDataCollectionIndex,
+  searchMasterDataIndexPaged,
+} from "@/modules/masterdata/services/masterdata-json-index-services"
 import type { MasterCollectionConfig, MasterCollectionFieldConfig } from "@/types/firestore-models"
 
 const MASTER_DATA_CHANGED_STORAGE_KEY = "master-data:changed-at"
+const MASTERDATA_DELTA_SYNC_KEY = "masterdata:delta-sync-at"
 const DEFAULT_PAGE_SIZE = 30
 const PAGE_SIZE_OPTIONS = [20, 30, 50] as const
 const MAX_CHANGED_LOOKUP_KEYS_IN_EVENT = 200
@@ -131,6 +140,53 @@ function notifyMasterDataChanged(change: Omit<MasterDataChangedPayload, "changed
       ...change,
     } satisfies MasterDataChangedPayload)
   )
+}
+
+function getLastDeltaSync(collectionName: string): Date | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(`${MASTERDATA_DELTA_SYNC_KEY}:${collectionName}`)
+    if (!raw) return null
+    const ts = parseInt(raw, 10)
+    return Number.isFinite(ts) && ts > 0 ? new Date(ts) : null
+  } catch {
+    return null
+  }
+}
+
+function setLastDeltaSync(collectionName: string, syncedAt: Date = new Date()) {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(`${MASTERDATA_DELTA_SYNC_KEY}:${collectionName}`, String(syncedAt.getTime()))
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+async function syncDeltaForCollection(collectionName: string): Promise<void> {
+  try {
+    const result = await ensureMasterDataCollectionIndex(collectionName)
+    if (!result) return
+
+    const snapshotUpdatedAt = new Date(result.index.updatedAt)
+    const since = getLastDeltaSync(collectionName) ?? (
+      Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
+    )
+    const syncStartedAt = new Date()
+    const changes = await listMasterDataChangeLogs(collectionName, since)
+
+    const lookupKeyField = result.index.lookupKeyField
+    for (const change of changes) {
+      applyMasterDataChangeLogToIndex(collectionName, change, lookupKeyField)
+    }
+    const latestChangeAt = changes.reduce<Date | null>((latest, change) => {
+      if (!change.changedAt) return latest
+      return !latest || change.changedAt > latest ? change.changedAt : latest
+    }, null)
+    setLastDeltaSync(collectionName, latestChangeAt ?? syncStartedAt)
+  } catch {
+    // Delta sync failure is non-fatal; Firestore path is still available
+  }
 }
 
 function normalizeText(value: unknown) {
@@ -376,6 +432,58 @@ export default function MasterDataPage() {
         const searchConfig = getSearchConfig(searchByCollection, activeConfig)
         const appliedConditions = getAppliedSearchConditions(activeConfig, searchConfig)
         const pageSize = pageSizeByCollection[activeConfig.collectionName] ?? DEFAULT_PAGE_SIZE
+        const currentPageNum = pageByCollection[activeConfig.collectionName] ?? 1
+        let pageIndex = 0
+
+        if (direction === "next") {
+          pageIndex = currentPageNum
+        } else if (direction === "previous") {
+          pageIndex = Math.max(0, currentPageNum - 2)
+        } else if (direction === "last") {
+          pageIndex = -1
+        }
+
+        const indexResult = await ensureMasterDataCollectionIndex(activeConfig.collectionName)
+        if (indexResult) {
+          const allResults = indexResult.index.records.filter((record) =>
+            appliedConditions.every((cond) => {
+              const fieldValue = String(record[cond.field] ?? "").toLowerCase()
+              const searchVal = String(cond.value).toLowerCase().trim()
+              if (!searchVal) return true
+              const op = cond.operator as string
+              if (op === "equals") return fieldValue === searchVal
+              if (op === "prefix") return fieldValue.startsWith(searchVal)
+              return fieldValue.includes(searchVal)
+            })
+          )
+          const totalCount = allResults.length
+          const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
+          if (direction === "last") pageIndex = totalPages - 1
+          const start = pageIndex * pageSize
+          const pageRows = allResults.slice(start, start + pageSize)
+
+          setRecordsByCollection((current) => ({
+            ...current,
+            [activeConfig.collectionName]: pageRows,
+          }))
+          setPageMetaByCollection((current) => ({
+            ...current,
+            [activeConfig.collectionName]: {
+              totalCount,
+              firstCursor: null,
+              lastCursor: null,
+              hasPreviousPage: pageIndex > 0,
+              hasNextPage: start + pageSize < totalCount,
+            },
+          }))
+          setPageByCollection((current) => ({
+            ...current,
+            [activeConfig.collectionName]: pageIndex + 1,
+          }))
+          setTableLoading(false)
+          return
+        }
+
         const page = await getDynamicMasterDataPage(activeConfig, {
           pageSize,
           direction,
@@ -429,10 +537,18 @@ export default function MasterDataPage() {
 
   useEffect(() => {
     let cancelled = false
-    void loadData().then((nextCollection) => {
+    void (async () => {
+      if (cancelled) return
+      const defaultCollections = [
+        "CusCodeList", "ItemCodeListMAV", "ItemCodeListMHB",
+        "UnitPriceList", "PIC.WH.CodeList", "UnitCodeList",
+      ]
+      await Promise.allSettled(defaultCollections.map((c) => syncDeltaForCollection(c)))
+      if (cancelled) return
+      const nextCollection = await loadData()
       if (cancelled || !nextCollection) return
       void loadActivePage("first", undefined)
-    })
+    })()
     return () => {
       cancelled = true
     }
