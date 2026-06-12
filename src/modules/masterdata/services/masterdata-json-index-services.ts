@@ -106,10 +106,15 @@ function getCollectionIndexUrls(
 }
 
 function getJsonBaseUrl() {
+  const envBaseUrl = process.env.NEXT_PUBLIC_MASTERDATA_INDEX_BASE_URL
   if (typeof window !== "undefined") {
-    return (window as Window & { __MASTERDATA_INDEX_BASE_URL__?: string }).__MASTERDATA_INDEX_BASE_URL__ ?? DEFAULT_JSON_BASE_URL
+    return (
+      (window as Window & { __MASTERDATA_INDEX_BASE_URL__?: string }).__MASTERDATA_INDEX_BASE_URL__ ??
+      envBaseUrl ??
+      DEFAULT_JSON_BASE_URL
+    )
   }
-  return process.env.NEXT_PUBLIC_MASTERDATA_INDEX_BASE_URL ?? DEFAULT_JSON_BASE_URL
+  return envBaseUrl ?? DEFAULT_JSON_BASE_URL
 }
 
 function getCollectionCacheTtl(collectionName: string) {
