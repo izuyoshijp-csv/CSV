@@ -81,7 +81,6 @@ ehthumbs.db
 serviceAccountKey.json
 firebase-adminsdk*.json
 
-# Master Data JSON index served by the app
-!public/masterdata-index/
-!public/masterdata-index/*.json
+# Master Data JSON index is served from Firebase Storage in production.
+public/masterdata-index/
 .masterdata-index/
