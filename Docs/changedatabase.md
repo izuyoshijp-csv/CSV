@@ -930,3 +930,66 @@ Cac buoc da hoan thanh (2026-06-10):
 - [x] Buoc 7: Master Data search/pagination bang JSON index
 - [x] Buoc 8: Rebuild automation + compact delta
 - [ ] Buoc 9: Kiem thu end-to-end (can Firebase thuc te)
+
+## Cap nhat 2026-06-15: Vercel Cron rebuild JSON hang tuan
+
+Muc tieu van hanh:
+
+```text
+Firestore la du lieu goc
+-> Vercel Cron goi API rebuild vao 12:00 thu 7 hang tuan gio Viet Nam
+-> API doc Firestore bang Firebase Admin
+-> API tao lai JSON snapshot
+-> API upload JSON len Firebase Storage /masterdata-index
+-> API xoa change log cu hon snapshot moi
+-> App search/lookup tiep tuc doc JSON tu Firebase Storage
+```
+
+Da them:
+
+- `src/app/api/cron/rebuild-masterdata-json-index/route.ts`
+  - API server-side rebuild JSON index.
+  - Doc `masterCollectionConfigs` va cac collection master data trong Firestore.
+  - Upload tung file JSON collection vao Firebase Storage.
+  - Upload `masterdata-index/manifest.json`.
+  - Compact `masterdataChangeLogs` cu hon lan rebuild moi.
+- `vercel.json`
+  - Cron schedule: `0 5 * * 6`.
+  - Nghia la 05:00 UTC thu 7 = 12:00 trua thu 7 gio Viet Nam.
+- `src/proxy.ts`
+  - Bo qua auth proxy cho `/api/cron` de Vercel Cron goi duoc API.
+
+Env can co tren Vercel:
+
+```text
+FIREBASE_ADMIN_PROJECT_ID
+FIREBASE_ADMIN_CLIENT_EMAIL
+FIREBASE_ADMIN_PRIVATE_KEY
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+NEXT_PUBLIC_MASTERDATA_INDEX_BASE_URL
+```
+
+Tuy chon nen them:
+
+```text
+CRON_SECRET
+```
+
+Neu can test tay:
+
+```text
+https://<vercel-domain>/api/cron/rebuild-masterdata-json-index?secret=<CRON_SECRET>
+```
+
+Ket qua mong doi:
+
+- API tra ve `ok: true`.
+- Network thay `manifest.json` va collection JSON doc tu `firebasestorage.googleapis.com`.
+- Search Master Data van ra ket qua.
+- Firestore read khong tang lon khi search.
+
+Ghi chu:
+
+- Lich nay chi rebuild JSON 1 lan/tuan theo yeu cau hien tai.
+- Neu user import/sua/xoa nhieu trong tuan, app van dung `masterdataChangeLogs` de va cache JSON tam thoi truoc lan rebuild ke tiep.
+- Bulk import hien tai chua ghi delta tung record day du cho user/may khac; neu can dung tuyet doi truoc rebuild, can nang cap delta log cho bulk import.
