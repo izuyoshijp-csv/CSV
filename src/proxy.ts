@@ -21,6 +21,7 @@ export async function proxy(request: NextRequest) {
     request.nextUrl.pathname.startsWith("/sign-up") ||
     request.nextUrl.pathname.startsWith("/forgot-password")
   const isLandingPage = request.nextUrl.pathname.startsWith("/landing")
+  const isMasterDataIndexAsset = request.nextUrl.pathname.startsWith("/masterdata-index/")
 
   if (isAuthPage) {
     if (isLoggedIn) {
@@ -30,6 +31,10 @@ export async function proxy(request: NextRequest) {
   }
 
   if (isLandingPage) {
+    return NextResponse.next()
+  }
+
+  if (isMasterDataIndexAsset) {
     return NextResponse.next()
   }
 
@@ -43,7 +48,7 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|_next/static|_next/image|favicon.ico).*)",
+    "/((?!api/auth|_next/static|_next/image|favicon.ico|masterdata-index).*)",
     "/",
   ],
 }
