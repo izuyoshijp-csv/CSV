@@ -8,7 +8,7 @@ import {
   createPICWHCodeList,
   createUnitCodeList,
   createUnitPriceList,
-  getDynamicMasterDataByKeys,
+  getDynamicMasterDataByLookupKeys,
   getLookupKeyField,
   type CusCodeListItem,
   type ItemCodeListItem,
@@ -965,7 +965,7 @@ async function loadRequestedMasterData(
       }
 
       const lookupKeyField = getLookupKeyField(config)
-      const records = await getDynamicMasterDataByKeys(config, missingKeys)
+      const records = await getDynamicMasterDataByLookupKeys(config, missingKeys)
       const recordsByLookupKey = new Map<string, Record<string, unknown>>()
       records.forEach((record) => {
         const lookupKey = normalizeText(
@@ -1012,17 +1012,6 @@ async function getMasterConfigsByCollection() {
 
 const MASTER_DATA_DELTA_SYNC_STORAGE_KEY = "masterdata:delta-sync-at"
 
-export function getLastDeltaSyncTime(collectionName: string): Date | null {
-  try {
-    const stored = window.localStorage.getItem(`${MASTER_DATA_DELTA_SYNC_STORAGE_KEY}:${collectionName}`)
-    if (!stored) return null
-    const ts = parseInt(stored, 10)
-    return Number.isFinite(ts) && ts > 0 ? new Date(ts) : null
-  } catch {
-    return null
-  }
-}
-
 function setLastDeltaSyncTime(collectionName: string, syncedAt: Date = new Date()) {
   try {
     window.localStorage.setItem(
@@ -1040,9 +1029,7 @@ async function syncDeltasForCollections(collections: string[]) {
     if (!result) continue
 
     const snapshotUpdatedAt = new Date(result.index.updatedAt)
-    const since = getLastDeltaSyncTime(collectionName) ?? (
-      Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
-    )
+    const since = Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
     const syncStartedAt = new Date()
     const changes = await listMasterDataChangeLogs(collectionName, since)
 

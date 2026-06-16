@@ -29,7 +29,10 @@ import {
   type QueryDocumentSnapshot,
 } from "firebase/firestore"
 import type { MasterCollectionConfig } from "@/types/firestore-models"
-import { createMasterDataChangeLog } from "./masterdata-change-log-services"
+import {
+  createMasterDataChangeLog,
+  createMasterDataChangeLogs,
+} from "./masterdata-change-log-services"
 import {
   patchMasterDataIndexRecord,
   removeMasterDataIndexRecord,
@@ -561,7 +564,48 @@ export async function getDynamicMasterDataByKeys(
   return records.filter((record): record is DynamicMasterDataRecord => Boolean(record))
 }
 
-export function getLookupKeyField(config: MasterCollectionConfig) {
+export async function getDynamicMasterDataByLookupKeys(
+  config: Pick<MasterCollectionConfig, "collectionName" | "fields">,
+  keys: string[]
+): Promise<DynamicMasterDataRecord[]> {
+  const db = getFirestoreSafe()
+  if (!db) {
+    throw new Error(
+      "Firebase is not configured. Please set NEXT_PUBLIC_FIREBASE_* environment variables."
+    )
+  }
+
+  const lookupKeyField = getLookupKeyField(config)
+  if (!lookupKeyField) return getDynamicMasterDataByKeys(config, keys)
+
+  const uniqueKeys = [...new Set(keys.map((key) => key.trim()).filter(Boolean))]
+  if (!uniqueKeys.length) return []
+
+  const collectionRef = collection(db, config.collectionName)
+  const recordsById = new Map<string, DynamicMasterDataRecord>()
+
+  for (let index = 0; index < uniqueKeys.length; index += 10) {
+    const chunk = uniqueKeys.slice(index, index + 10)
+    const snapshot = await getDocs(query(collectionRef, where(lookupKeyField, "in", chunk)))
+    snapshot.docs.forEach((document) => {
+      recordsById.set(document.id, mapDynamicMasterDataSnapshot(document))
+    })
+  }
+
+  const missingDocumentIdKeys = uniqueKeys.filter((key) => {
+    const safeKey = makeSafeDocumentId(key)
+    return safeKey && !recordsById.has(safeKey)
+  })
+  const directRecords = await getDynamicMasterDataByKeys(config, missingDocumentIdKeys)
+  directRecords.forEach((record) => {
+    const id = String(record.id ?? record.documentId ?? "")
+    if (id) recordsById.set(id, record)
+  })
+
+  return [...recordsById.values()]
+}
+
+export function getLookupKeyField(config: Pick<MasterCollectionConfig, "fields">) {
   return config.fields[0] ?? ""
 }
 
@@ -814,13 +858,16 @@ export async function createDynamicMasterDataRecords(
       patchMasterDataIndexRecord(config.collectionName, indexedRecord, lookupKeyField)
     }
 
-    await createMasterDataChangeLog({
-      collectionName: config.collectionName,
-      documentId: `bulk-import-${index}-${batchSize}`,
-      baseDocumentId: "bulk",
-      lookupKey: `bulk:${index}:${indexedChunk.length}`,
-      operation: "update",
-    })
+    await createMasterDataChangeLogs(
+      indexedChunk.map((indexedRecord) => ({
+        collectionName: config.collectionName,
+        documentId: String(indexedRecord.documentId ?? indexedRecord.id ?? ""),
+        baseDocumentId: String(indexedRecord.baseDocumentId ?? indexedRecord.documentId ?? indexedRecord.id ?? ""),
+        lookupKey: String(indexedRecord[lookupKeyField] ?? indexedRecord.baseDocumentId ?? ""),
+        operation: "update",
+        record: indexedRecord,
+      }))
+    )
 
     if (delayMs > 0 && imported < records.length) {
       await sleep(delayMs)

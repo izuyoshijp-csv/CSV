@@ -143,18 +143,6 @@ function notifyMasterDataChanged(change: Omit<MasterDataChangedPayload, "changed
   )
 }
 
-function getLastDeltaSync(collectionName: string): Date | null {
-  if (typeof window === "undefined") return null
-  try {
-    const raw = window.localStorage.getItem(`${MASTERDATA_DELTA_SYNC_KEY}:${collectionName}`)
-    if (!raw) return null
-    const ts = parseInt(raw, 10)
-    return Number.isFinite(ts) && ts > 0 ? new Date(ts) : null
-  } catch {
-    return null
-  }
-}
-
 function setLastDeltaSync(collectionName: string, syncedAt: Date = new Date()) {
   if (typeof window === "undefined") return
   try {
@@ -170,9 +158,7 @@ async function syncDeltaForCollection(collectionName: string): Promise<void> {
     if (!result) return
 
     const snapshotUpdatedAt = new Date(result.index.updatedAt)
-    const since = getLastDeltaSync(collectionName) ?? (
-      Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
-    )
+    const since = Number.isFinite(snapshotUpdatedAt.getTime()) ? snapshotUpdatedAt : undefined
     const syncStartedAt = new Date()
     const changes = await listMasterDataChangeLogs(collectionName, since)
 

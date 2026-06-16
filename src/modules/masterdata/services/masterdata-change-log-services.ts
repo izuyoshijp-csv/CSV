@@ -1,5 +1,6 @@
 import {
   collection,
+  doc,
   query,
   where,
   orderBy,
@@ -7,6 +8,7 @@ import {
   getDocs,
   addDoc,
   serverTimestamp,
+  writeBatch,
   type QueryDocumentSnapshot,
   type DocumentData,
 } from "firebase/firestore"
@@ -56,6 +58,40 @@ export async function createMasterDataChangeLog(
   })
 
   return docRef.id
+}
+
+export async function createMasterDataChangeLogs(
+  entries: CreateChangeLogOptions[]
+): Promise<number> {
+  const db = getFirestoreSafe()
+  if (!db || !entries.length) {
+    if (!db) console.warn("[changeLog] Firestore not available, skipping change log write")
+    return 0
+  }
+
+  let written = 0
+  for (let index = 0; index < entries.length; index += 450) {
+    const batch = writeBatch(db)
+    const chunk = entries.slice(index, index + 450)
+    chunk.forEach((entry) => {
+      const ref = doc(collection(db, MASTERDATA_CHANGE_LOGS_COLLECTION))
+      batch.set(ref, {
+        collectionName: entry.collectionName,
+        documentId: entry.documentId,
+        baseDocumentId: entry.baseDocumentId,
+        lookupKey: entry.lookupKey,
+        operation: entry.operation,
+        record: entry.record ?? null,
+        actorId: entry.actorId ?? null,
+        changedAt: serverTimestamp(),
+        version: Date.now(),
+      })
+    })
+    await batch.commit()
+    written += chunk.length
+  }
+
+  return written
 }
 
 export async function listMasterDataChangeLogs(
